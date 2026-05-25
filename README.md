@@ -78,6 +78,76 @@ quarto add leovan/quarto-pseudocode --no-prompt
 
 This will create an `_extensions/` directory with the required extensions.
 
+## Translating the Quarto Sources
+
+This repository includes a DeepSeek-based translation pipeline for the Quarto
+`.qmd` sources:
+
+```bash
+export DEEPSEEK_API_KEY="your_deepseek_api_key"
+python scripts/translate_qmd_deepseek.py --dry-run
+python scripts/translate_qmd_deepseek.py --concurrency 4
+```
+
+By default, translated files are written under `zh/` with the same relative
+paths, for example `zh/src/chap1.qmd`. The script skips YAML front matter and
+fenced code blocks, while still translating reader-facing Quarto chunk captions
+such as `#| fig-cap:`. It preserves Quarto/Pandoc syntax and caches translated
+chunks in `.translation-cache/deepseek-qmd.json` so interrupted runs can be
+resumed safely. Each translated chunk is structurally validated before it is
+written to the cache, so translations that add code fences, drop anchors, or
+change table/fenced-div row counts fail fast instead of silently corrupting the
+Quarto source.
+
+Useful options:
+
+```bash
+# Translate only selected files
+python scripts/translate_qmd_deepseek.py index.qmd src/chap1.qmd --concurrency 4
+
+# Overwrite the source files after creating .bak backups
+python scripts/translate_qmd_deepseek.py --in-place --backup --concurrency 4
+
+# Use another DeepSeek-compatible endpoint or model
+python scripts/translate_qmd_deepseek.py --api-base https://api.deepseek.com/chat/completions --model deepseek-chat
+
+# Re-translate all chunks even when cached
+python scripts/translate_qmd_deepseek.py --force
+```
+
+`--concurrency` controls the number of simultaneous API calls. Start with
+`--concurrency 3` or `--concurrency 4`; increase it only if your DeepSeek
+account limit can handle the request rate. The default `--max-chars 3000`
+keeps chunks small enough for long tables and Quarto blocks; use a smaller
+value if an API response repeatedly fails validation.
+
+Render the translated Chinese sources with:
+
+```bash
+python scripts/render_zh_book.py
+python -m http.server 8001 --directory zh/_book
+```
+
+Then open http://127.0.0.1:8001/ in your browser. The render helper creates a
+temporary Quarto project, overlays `zh/index.qmd`, `zh/license.qmd`, and
+`zh/src/*.qmd` onto the original book assets, and copies the generated HTML to
+`zh/_book/`. The generated `zh/_book/` directory is intentionally ignored by
+Git; commit the translated `.qmd` sources, not rendered output.
+
+To render only selected translated chapters:
+
+```bash
+python scripts/render_zh_book.py chap1 chap2
+python scripts/render_zh_book.py src/chap3.qmd
+```
+
+If Quarto needs a specific Python environment for executable cells, pass it
+explicitly or set `QUARTO_PYTHON`:
+
+```bash
+python scripts/render_zh_book.py --python /path/to/python
+```
+
 ## Building the Book
 
 ### Preview (development)

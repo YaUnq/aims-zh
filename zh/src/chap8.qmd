@@ -1,0 +1,1046 @@
+---
+format:
+  html:
+    include-after-body:
+      text: |
+        <script>
+        // Auto-execute all pyodide cells after initialization
+        document.addEventListener('DOMContentLoaded', function() {
+          function waitForPyodide() {
+            if (typeof globalThis.mainPyodide !== 'undefined' && globalThis.mainPyodide) {
+              if (typeof globalThis.qpyodideCellDetails !== 'undefined') {
+                globalThis.qpyodideCellDetails.forEach((cell, index) => {
+                  if (cell.options && cell.options.autorun === 'true') {
+                    setTimeout(() => {
+                      const runButton = document.querySelector(`#qpyodide-button-run-${cell.id}`);
+                      if (runButton && !runButton.disabled) {
+                        runButton.click();
+                      }
+                    }, index * 1000);
+                  }
+                });
+              }
+            } else {
+              setTimeout(waitForPyodide, 500);
+            }
+          }
+          setTimeout(waitForPyodide, 2000);
+        });
+        </script>
+filters:
+  - pyodide
+pyodide:
+  packages:
+    - numpy
+    - matplotlib
+    - scipy
+---
+
+# 信息与机制设计 {#sec-design}
+
+::: {.callout-note title="预期学习成果"}
+通过本章学习，你将能够：
+
+1. **解释** 为什么古德哈特定律不仅是一个警示性的格言，而是一个形式化的博弈论现象，并对其在AI评估背景下的四种变体进行分类。
+2. **形式化** 将AI评估建模为评估设计者与模型构建者之间的Stackelberg博弈，并证明确定性基准会失败，而随机化机制能够实现一次性激励对齐。
+3. **分析** 重复评估中的信息-方差权衡：为什么减少噪声需要揭示信息，以及这如何随时间推移削弱对齐效果。
+4. **推导** 将分布校正作为恢复对齐的主要机制，并计算最优评估大小 $k^*$ 与校正率 $\rho$ 的函数关系。
+5. **建模** 将度量设计视为主理人-代理人问题，并刻画开发者在何时偏好揭示、隐藏或混淆评估信息。
+6. **应用** 位置表示和位置比例准则，利用社会选择理论选取代表性的基准子集。
+7. **综合** 涵盖策略鲁棒性、信息控制与代表性等AI基准的设计原则。
+:::
+
+::: {.callout-tip title="建议的授课计划" collapse="true"}
+本章可用 **3次课程**（每次75–90分钟）完成：
+
+**第1讲：评估博弈**
+
+- 古德哈特定律与策略性操纵（15分钟）
+- Stackelberg基准博弈：设定与确定性机制的失败（20分钟）
+- 通过随机化实现一次性激励对齐（25分钟）
+- 动手实践：确定性评估与随机化评估模拟（15分钟）
+
+**第2讲：信息泄漏与恢复对齐**
+
+- 重复评估与信息-方差权衡（20分钟）
+- 分布校正与对齐恢复（25分钟）
+- 最优评估大小与保留机制（20分钟）
+- 动手实践：帕累托前沿与校正模拟（10分钟）
+
+**第3讲：度量设计与代表性选取**
+
+- 作为主理人-代理人问题的度量设计（25分钟）
+- 信息引出：揭示、隐藏、混淆（20分钟）
+- 通过社会选择理论选取代表性基准（20分钟）
+- 设计原则综合（10分钟）
+:::
+
+::: {.callout-note title="符号"}
+本章引入博弈论符号：$F$（任务全集）、$F_E/F_M$（评估者/构建者任务集）、$\pi_E/\pi_M$（抽样分布）、$f(\theta)$（任务表现）、$u_E$（评估者效用）、$\Delta_t$（不对齐）和 $\gamma$（博弈惩罚）。完整的符号参考请参阅[符号附录](notation.qmd)。
+:::
+
+
+## 当测量成为目标时 {#sec-goodhart}
+
+> “当一个测量成为目标时，它就不再是一个好的测量。”——查尔斯·古德哈特（1975）
+
+在之前的章节中，我们将评估视为一个*统计学*问题：如何从带噪声的观测中估计潜在能力（@sec-foundations），如何量化测量精度（@sec-reliability），以及如何评估一个基准是否测量了它声称测量的东西（@sec-validity, @sec-causality）。贯穿始终，我们隐含地假设数据生成过程是*固定不变*的---测量行为不会改变被测量的现象。
+
+一旦基准变得*有影响力*，这一假设便不再成立。当开发者的声誉、资金或监管地位依赖于基准分数时，开发者就有充分的动机专门针对基准进行优化---而不是针对基准所声称测量的更广泛能力。数据生成过程不再是固定不变的：它会随着测量本身而发生变化。这就是古德哈特定律（Goodhart's Law），在AI评估中，这不是一个隐喻，而是一个可被证明的、反复出现的现象。
+
+**具体例子。** 基础模型透明度指数（Foundation Model Transparency Index, FMTI）在首次发布后得分大幅跃升，并非因为公司变得更透明，而是因为他们知道了测量了*哪些具体指标*，并据此优化了披露内容。Chatbot Arena面临着策略性提交的担忧：开发者可以选择性地部署那些针对平台上出现的查询类型而优化的模型。而基准污染---即训练数据中包含评估条目---对于市场价值依赖于排行榜位置的开发者来说，是一种理性行为（@sec-contamination）。
+
+@manheim2018categorizing 识别了古德哈特效应的四种变体，每种变体都有不同的因果机制：
+
+1. **回归型古德哈特效应**：代理指标 $\hat{u}$ 与真实目标 $u$ 相关但并不完全相同。优化 $\hat{u}$ 会出现过度优化，因为 $\hat{u}$ 的极端值往往源于噪声，而非真正的极端 $u$。这就是 @sec-reliability 所述的测量误差情形：一个 $\alpha = 0.7$ 的基准捕捉了70%的真实方差和30%的噪声，因此选择得分最高的模型，部分是在选择侥幸的噪声。
+
+2. **极值型古德哈特效应**：在分布的主体部分成立的 $\hat{u}$ 与 $u$ 之间的关系，在分布的尾部被打破。一个能可靠地排序典型模型的基准，在应用于专门为了提高基准分数而设计的模型时，可能会灾难性地失效。
+
+3. **因果型古德哈特效应**：代理指标与目标共享一个共同原因。优化代理指标可能会破坏这种因果联系。如果“通过安全基准”和“实际上安全”都是由“训练过程谨慎”引起的，那么开发者可以找到绕过这一共同原因的基准捷径。
+
+4. **对抗型古德哈特效应**：一个智能体主动利用代理指标与目标之间的差距。这是在竞争性AI评估中占主导地位的情形，也是本章的重点。
+
+从第3--6章到本章的转变是威胁来源的转变。测量误差（@sec-reliability）是随机性的。效度威胁（@sec-validity-threats）是系统性的但非有意的。策略性操纵是*刻意且自适应的*：DGP自身因测量而改变。这与执行性预测（performative prediction）[@perdomo2020performative]的文献相联系，其中部署模型的行为会改变其运行的数据分布；也与策略性分类（strategic classification）[@hardt2016strategic]的文献相联系，其中智能体操纵其特征以获得有利结果。
+
+本章余下部分构建三层策略分析：(i) 基准披露与信息设计——评估者应透露有关评估机制的多少信息？(ii) 指标选择与报告粒度——评估者应报告哪些指标，并以何种详细程度？(iii) 重复评估的机制设计——当博弈重复时，评估者如何保持对齐？
+
+
+## 评估博弈 {#sec-evaluation-game}
+
+我们现在将评估设计者与模型构建者之间的策略互动形式化为一个 Stackelberg 博弈。设计者首先承诺一个评估机制；构建者随后训练一个模型。关键问题是：在何种条件下，基准机制能够激励构建者提升在*全部*任务分布上的表现，而非仅仅优化在所测量的特定任务上的表现？
+
+### 设定：评估者与构建者 {#sec-game-setup}
+
+令 $\Theta$ 表示所有可能模型的集合。对于给定模型 $\theta \in \Theta$，令 $f(\theta) \in [0, 1]$ 表示该模型在任务 $f$ 上的表现。所有可能任务的全集是有限集 $F$，且 $|F| = N$。
+
+::: {.callout-note title="定义：评估设计者的效用"}
+评估设计者对于一个模型 $\theta$ 的效用是所有任务上的总体现：
+$$
+u_E(\theta) = \sum_{f \in F} f(\theta)
+$$
+设计者充当社会规划者，寻求能够广泛而非狭窄地执行任务的模型。
+:::
+
+各方通过从 $F$ 中采样来获取任务：设计者根据分布 $\pi_E$ 在 $F$ 上进行抽取，形成评估集 $F_E$；而构建者根据分布 $\pi_M$ 进行抽取，形成训练集 $F_M$。实践中，$\pi_M$ 近似均匀（构建者能够广泛获取训练数据），而 $\pi_E$ 通常偏向于那些易于构建、易于评分的任务，或反映特定评估优先级的任务。
+
+::: {.callout-note title="定义：Stackelberg基准博弈"}
+博弈分三个阶段进行，参数化为一个机制 $(M, r)$，其中 $M$ 是采样函数，而 $r: \Theta \times \mathcal{P}(F) \to \mathbb{R}$ 是奖励函数：
+
+1. **设计者行动（事前）：** 评估设计者公布机制 $(M, r)$。若 $M$ 为随机化，设计者秘密抽取随机性 $\omega$ 并计算 $S^* = M(F_E, \omega)$，隐藏实现结果。若 $M$ 为确定性，则 $S^* \subseteq F_E$ 固定不变。
+
+2. **构建者行动：** 构建者观察到机制 $(M, r)$ 但未观察到实现集 $S^*$，并选择一个模型 $\theta^* \in \Theta$。
+
+3. **评估阶段（事后）：** 设计者公布分数 $r(\theta^*, S^*)$。构建者的收益为 $r(\theta^*, S^*)$；设计者的收益为 $u_E(\theta^*)$。
+:::
+
+构建者的激励（在 $S^*$ 上的表现）与设计者的目标（在全部 $F$ 上的表现）之间的错位引发了古德哈特定律问题。
+
+### 确定性机制的失败 {#sec-deterministic-failure}
+
+首先考虑确定性机制，其中设计者公布固定子集 $S^* \subseteq F_E$。
+
+::: {.callout-warning title="命题：确定性机制的失败"}
+若设计者公布确定性集合 $S^*$，并采用加性奖励 $r(\theta, S) = \sum_{f \in S} f(\theta)$，则构建者的最佳响应为：
+$$
+\theta^* \in \arg\max_{\theta \in \Theta} \sum_{f \in S^*} f(\theta)
+$$
+这对外部 $S^*$ 的任务表现*毫无激励*。
+:::
+
+*证明。* 构建者直接观察到 $S^*$ 并最大化已知目标。$F \setminus S^*$ 中的任务不影响分数。$\square$
+
+这正是古德哈特的对抗性变体：构建者利用已知的评估结构进行专门化。这也是通过策略视角看待的来自 @sec-construct-underrepresentation 的构念代表性不足问题：固定基准*系统地忽略*了 $S^*$ 之外的能力，而理性的构建者会做出相应反应。
+
+
+### 通过随机化实现一次性对齐 {#sec-one-shot-alignment}
+
+尽管确定性机制失败，随机化提供了一条前进道路。当构建者对将评估哪些任务面临真正的不确定性时，战略格局从根本上发生变化。
+
+::: {.callout-warning title="定理1：一次性激励对齐（全知构建者）"}
+考虑一个随机化机制，其中 (i) $M$ 均匀抽取单个任务：$s \sim \text{Unif}(F_E)$，(ii) 奖励为 $r(\theta, \{s\}) = s(\theta)$，(iii) 构建者对构成 $F_E$ 的任务拥有均匀先验 $\pi$。那么构建者的期望奖励与设计者效用成正比：
+$$
+\mathbb{E}_{F_E \sim \pi}\!\left[\mathbb{E}_{s \sim \text{Unif}(F_E)}[s(\theta)]\right] = \frac{1}{|F|}\, u_E(\theta)
+$$
+并且构建者的最佳响应最大化 $u_E(\theta)$。
+:::
+
+*证明概要。* 在关于构成 $F_E$ 的任务的对称（均匀）先验下，构建者没有任何信息能区分任意任务 $f_i$ 与 $f_j$。由于对称性，任意特定任务 $f$ 为被采样任务的边际概率是常数：$P(s = f) = 1/|F|$。因此，构建者的期望回报为 $(1/|F|) \sum_{f \in F} f(\theta) = (1/|F|) \, u_E(\theta)$，最大化期望回报等价于最大化 $u_E(\theta)$。$\square$
+
+全知版本假设构建者知道所有 $F$。更现实的版本考虑信息有限的构建者：
+
+::: {.callout-warning title="定理 2：一次性对齐（有限信息）"}
+假设构建者从分布 $p_M$ 中独立同分布地抽取任务，并相信评估者也从 $p_M$ 抽取。在单样本机制下，构建者的最佳响应是：
+$$
+\theta^* \in \arg\max_{\theta \in \Theta} \mathbb{E}_{f \sim p_M}[f(\theta)]
+$$
+也就是说，构建者在其自身对任务全集的最佳近似上进行优化。
+:::
+
+*证明概要。* 构建者的期望回报，基于其对 $F_E$ 的先验以及 $M$ 中的随机性，等于 $\mathbb{E}_{f \sim p_M}[f(\theta)]$。由于 $F_M$ 从 $p_M$ 中抽取，构建者的最佳响应是在 $F_M$ 上进行经验风险最小化，这是在其信息条件下所能做到的最佳结果。$\square$
+
+这一结果非常有力：单样本机制是评估设计者“所能达到的最佳效果”。构建者的最佳响应是尽其所能逼近自己对 $F$ 的近似——本质上是对所有可用数据进行广泛训练。在激励对齐下，构建者在其任务集 $F_M$ 上执行**经验风险最小化**（ERM）。根据经典一致收敛 [@vapnik1998statistical]，限制到任何子集 $S \subset F_M$ 只会增加遗憾；构建者没有动机去“投机”，只聚焦于狭窄的任务集。
+
+### 讨论：随机化的作用 {#sec-randomization-discussion}
+
+一次性对齐结果揭示了与前面章节的统计效率目标之间的根本性矛盾。在 @sec-fisher-design 和 @sec-cat 中，我们展示了*针对性*评估——选择能最大化关于 $\theta$ 的 Fisher 信息的项目——在统计上是最优的。但针对性评估需要揭示评估者认为哪些任务具有信息性，这就产生了可利用的结构。
+
+随机化评估对于*估计精度*并非最优，但对于*激励对齐*却是最优的。这种统计效率与策略稳健性之间的矛盾是一个反复出现的主题：
+
+- 计算机化自适应测验（@sec-cat）通过选题策略揭示评估者对能力的了解，从而将评估者的优先级透明化。
+- 贝叶斯劝说 [@kamenica2011bayesian] 提供了信息设计的框架：评估者是选择信息结构的发送者，建造者是进行更新并做出最佳回应的接收者。评估者的问题在于设计一种信号，以诱导建造者采取评估者所偏好的行动。
+
+解决方案，正如我们在接下来的两节中展开的，是评估者必须*进行纠正性投资*，以使不可避免的信息泄露变得无害。
+
+{{< include _plt_setup.qmd >}}
+
+```{pyodide-python}
+#| label: deterministic-vs-randomized
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+
+# --- Setup ---
+N = 50           # total tasks in universe F
+n_eval = 10      # tasks in evaluation set
+n_rounds = 200   # simulation rounds
+
+# Task values: how much each task contributes to "true capability"
+task_values = np.random.uniform(0.3, 1.0, N)
+
+# --- Deterministic mechanism: builder knows S* ---
+# Builder puts all effort into the known evaluation tasks
+det_eval_set = np.random.choice(N, n_eval, replace=False)
+det_perf = np.zeros(N)
+det_perf[det_eval_set] = 0.95  # high on evaluated tasks
+det_perf[~np.isin(np.arange(N), det_eval_set)] = 0.2  # low elsewhere
+
+# --- Randomized mechanism: builder faces uncertainty ---
+# Under randomized eval, builder's best response is to train broadly
+rand_perf = np.full(N, 0.65)  # uniform effort across all tasks
+
+# --- Evaluate ---
+# True utility = sum of performance across ALL tasks
+det_utility = det_perf.sum()
+rand_utility = rand_perf.sum()
+
+# Eval score = average on sampled tasks
+n_trials = 500
+det_scores = np.array([det_perf[np.random.choice(N, n_eval, replace=False)].mean()
+                       for _ in range(n_trials)])
+rand_scores = np.array([rand_perf[np.random.choice(N, n_eval, replace=False)].mean()
+                        for _ in range(n_trials)])
+
+# --- Plot ---
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+colors = ['#5B8DEE', '#E8637A', '#45BF7C', '#F0A35C', '#B07CD8']
+
+# Panel 1: Task-level performance
+ax = axes[0]
+sorted_idx_det = np.argsort(-det_perf)
+ax.bar(range(N), det_perf[sorted_idx_det], color=colors[1], alpha=0.7, width=1.0)
+ax.set_xlabel('Task (sorted)')
+ax.set_ylabel('Performance')
+ax.set_title('Deterministic')
+ax.set_ylim(0, 1.05)
+ax.axhline(y=det_perf.mean(), color='k', ls='--', lw=0.8)
+
+ax = axes[1]
+ax.bar(range(N), rand_perf[np.argsort(-rand_perf)], color=colors[0], alpha=0.7, width=1.0)
+ax.set_xlabel('Task (sorted)')
+ax.set_title('Randomized')
+ax.set_ylim(0, 1.05)
+ax.axhline(y=rand_perf.mean(), color='k', ls='--', lw=0.8)
+
+# Panel 3: Utility comparison
+ax = axes[2]
+bar_x = [0, 1]
+bar_vals = [det_utility / N, rand_utility / N]
+bar_colors = [colors[1], colors[0]]
+bars = ax.bar(bar_x, bar_vals, color=bar_colors, width=0.6, alpha=0.8)
+ax.set_xticks(bar_x)
+ax.set_xticklabels(['Det.', 'Rand.'])
+ax.set_ylabel('Avg. true utility')
+ax.set_title('Alignment')
+ax.set_ylim(0, 0.85)
+for b, v in zip(bars, bar_vals):
+    ax.text(b.get_x() + b.get_width()/2, v + 0.02, f'{v:.2f}', ha='center', va='bottom')
+
+plt.tight_layout()
+plt.show()
+```
+
+**Figure.** 在确定性机制下（左图），构建者将精力集中在 $k=10$ 个已知评估任务上，忽略其余任务，从而取得高基准分数，但真实效用较低。在随机化机制下（中图），构建者将努力广泛分散。右图比较了所有任务的平均真实效用：随机化机制产生的效用显著更高，尽管在任何单一任务上的峰值表现较低。
+
+
+## 信息-方差权衡 {#sec-info-variance-tradeoff}
+
+定理 1 确立了随机化评估在单次设定中能实现激励对齐。但基准测试作为一种*重复博弈*运行：每周排行榜、每月提交、每季度发布新基准。在重复评估中，仅靠随机化不足以实现对齐，因为信息会*泄露*。
+
+### 重复评估与信息泄露 {#sec-repeated-game}
+
+::: {.callout-note title="定义：重复评估博弈"}
+在每一轮 $t = 1, 2, \ldots$ 中：
+
+1.  评估者通过根据 $\pi_E$ 从 $F$ 中抽样，生成一个新的评估集 $F_E^{(t)}$。
+2.  评估者通过机制 $M$ 从 $F_E^{(t)}$ 中抽取 $k$ 个任务并公布分数。
+3.  构建者观察到评估的 $k$ 个任务，更新其对评估分布的估计 $\hat{\pi}_{E,t}$ ，并选择模型 $\theta_t$。
+:::
+
+$k$ 任务平均奖励的方差满足 $\text{Var}(\hat{r}_k(\theta)) \approx \sigma^2/k$。要可靠地区分两个性能差距为 $\Delta$ 的模型（在 95% 置信度下）要求 $k \geq 4\sigma^2/\Delta^2$。随着模型改进并趋同（$\Delta \to 0$），所需的样本量呈二次增长。这产生了增加 $k$ 的无情市场压力。
+
+但是，增加 $k$ 以减少方差的同时，也增加了构建者积累有关 $\pi_E$ 信息的速率。构建者在时间 $t$ 的*信息集*是 $\mathcal{I}_t = \bigcup_{i=1}^{t-1} S_i$，其中 $S_i$ 是在第 $i$ 轮抽取的任务集。*泄露量* 定义为 $L_t = |\mathcal{I}_t|/|F|$。
+
+### 后验集中与激励失准 {#sec-posterior-concentration}
+
+随着构建者观察到各轮抽取的任务，其对评估分布的估计 $\hat{\pi}_{E,t}$ 将集中在真实的 $\pi_E$ 周围。根据贝叶斯非参数统计的标准结果，后验集中速率为 $O(d_{\text{eff}} \log m / m)$，其中 $m$ 是观测数量，$d_{\text{eff}}$ 是分布类的有效维度。
+
+::: {.callout-warning title="命题：分布学习下的激励失准"}
+令 $\hat{\pi}_{E,t}$ 表示构建者在时间 $t$ 对 $\pi_E$ 的后验均值估计。构建者的最优策略是 $\theta^*_t = \arg\max_\theta \mathbb{E}_{f \sim \hat{\pi}_{E,t}}[f(\theta)]$。那么：
+
+1.  **初始对齐:** 当对 $\pi_E$ 的先验分布是扩散的，构建者会广泛地优化，逼近在整个全集 $F$ 上的性能。
+
+2. **后验集中导致专门化：** 当 $\hat{\pi}_{E,t}$ 向 $\pi_E$ 集中时：
+$$
+\lim_{t \to \infty} \theta^*_t = \arg\max_{\theta \in \Theta} \mathbb{E}_{f \sim \pi_E}[f(\theta)]
+$$
+若 $\pi_E$ 是非均匀的，建造者会专门化到高密度区域，牺牲广泛的能力。
+:::
+
+这是核心张力：*私有化在单次设定中有效，但重复评估会揭示信息，使得策略性专门化成为可能。* 建造者无法确定一个固定的评估集（因为 $F_E^{(t)}$ 每轮都会重新采样），但通过重复观察，建造者能了解 $\pi_E$ 本身——即评估任务抽取的*分布*。
+
+### 帕累托前沿 {#sec-pareto-frontier}
+
+定义时间 $t$ 的 **残差错配** 为：
+$$
+\Delta_t = \mathbb{E}_{f \sim \pi_E^{(t)}}[f(\theta^*_t)] - \frac{1}{|F|} u_E(\theta^*_t)
+$$
+
+这衡量了建造者优化目标（在 $\pi_E$ 下的期望性能）与社会需求（整个 $F$ 上的总体性能）之间的差距。当 $\pi_E$ 是均匀分布时，$\Delta_t = 0$。
+
+没有一种评估策略可以同时实现低方差和低泄漏。方差随 $k$ 增大而减小；泄漏随 $k$ 增大而增加。改变 $k$ 将描绘出一条帕累托前沿，评估者必须在其上选择合意的操作点。
+
+```{pyodide-python}
+#| label: pareto-frontier
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+
+# --- Simulation parameters ---
+N = 200          # task universe size
+n_rounds = 200   # number of rounds
+k_values = [5, 10, 20, 50, 100]
+n_trials = 20    # Monte Carlo trials
+
+# Initial biased evaluator distribution: overweight first 40% of tasks by 3x
+pi_E_true = np.ones(N) / N
+pi_E_true[:int(0.4 * N)] *= 3.0
+pi_E_true /= pi_E_true.sum()
+
+colors = ['#5B8DEE', '#45BF7C', '#F0A35C', '#E8637A', '#B07CD8']
+
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+for ki, k in enumerate(k_values):
+    all_variance = np.zeros((n_trials, n_rounds))
+    all_kl = np.zeros((n_trials, n_rounds))
+    all_misalign = np.zeros((n_trials, n_rounds))
+
+    for trial in range(n_trials):
+        # Builder starts with uniform prior (Dirichlet(1,...,1))
+        counts = np.ones(N)
+
+        for t in range(n_rounds):
+            # Evaluator samples k tasks from pi_E
+            tasks = np.random.choice(N, size=k, p=pi_E_true, replace=True)
+
+            # Score variance: use task values as performance
+            task_scores = np.random.normal(0.5, 0.2, k)
+            all_variance[trial, t] = np.var(task_scores)
+
+            # Builder updates posterior
+            for task in tasks:
+                counts[task] += 1
+
+            # Builder's estimate of pi_E
+            pi_hat = counts / counts.sum()
+
+            # KL divergence from true pi_E
+            mask = pi_E_true > 0
+            kl = np.sum(pi_E_true[mask] * np.log(pi_E_true[mask] / pi_hat[mask]))
+            all_kl[trial, t] = kl
+
+            # Misalignment: TV distance as proxy
+            tv = 0.5 * np.sum(np.abs(pi_hat - np.ones(N)/N))
+            bias_tv = 0.5 * np.sum(np.abs(pi_E_true - np.ones(N)/N))
+            # Builder exploits learned bias: misalignment ~ min(learned_bias, true_bias)
+            all_misalign[trial, t] = min(tv, bias_tv)
+
+    col = colors[ki % len(colors)]
+    rounds = np.arange(n_rounds)
+
+    # Panel 1: Evaluation variance (averaged over rounds, show as function of t)
+    avg_var = all_variance.mean(axis=0)
+    axes[0].plot(rounds, np.convolve(avg_var, np.ones(10)/10, mode='same'),
+                 color=col, label=f'k={k}', lw=1.2)
+
+    # Panel 2: KL divergence (builder's learning of pi_E)
+    avg_kl = all_kl.mean(axis=0)
+    axes[1].plot(rounds, avg_kl, color=col, label=f'k={k}', lw=1.2)
+
+    # Panel 3: Misalignment
+    avg_mis = all_misalign.mean(axis=0)
+    axes[2].plot(rounds, avg_mis, color=col, label=f'k={k}', lw=1.2)
+
+axes[0].set_xlabel('Round')
+axes[0].set_ylabel('Score variance')
+axes[0].set_title('Evaluation noise')
+axes[0].legend(ncol=2, loc='upper right')
+
+axes[1].set_xlabel('Round')
+axes[1].set_ylabel('KL divergence')
+axes[1].set_title("Builder's learning")
+
+axes[2].set_xlabel('Round')
+axes[2].set_ylabel('Misalignment')
+axes[2].set_title('Incentive drift')
+
+plt.tight_layout()
+plt.show()
+```
+
+**图.** 在 $|F| = 200$ 项任务、200轮次中，不同 $k \in \{5, 10, 20, 50, 100\}$ 的信息-方差帕累托前沿。左图：较大的 $k$ 对应的评估噪声（得分方差）更低。中图：较大的 $k$ 使构建者更快地学习 $\pi_E$，衡量指标为构建者后验分布与真实 $\pi_E$ 之间的KL散度。右图：随着构建者后验的集中，激励不一致性增大。没有单一的 $k$ 能同时实现低噪声和低不一致性——这是一种基本的权衡。
+
+
+## 恢复对齐 {#sec-restoring-alignment}
+
+前一节的帕累托前沿似乎陷入僵局：任何 $k$ 的选择都会牺牲测量精度或激励对齐。解决之道在于认识到*评估者也是学习者*。如果评估者随时间校正其分布，那么构建者积累的信息就会过时。
+
+### 分布校正 {#sec-distribution-correction}
+
+::: {.callout-note title="假设：分布校正"}
+评估者通过线性插值以速率 $\rho \in (0, 1]$ 向均匀分布更新 $\pi_E^{(t)}$：
+$$
+\pi_E^{(t)} = (1 - \rho)\,\pi_E^{(t-1)} + \rho \cdot \text{Uniform}(F)
+$$
+从而 $\text{KL}(\pi_E^{(t)} \| \text{Uniform}(F)) \to 0$ 以速率 $\rho$ 指数衰减。
+:::
+
+在实践中，评估者通过多种渠道纠正偏见：用户发现基准未覆盖的模型故障而提交的*事件报告*；跨能力维度（语言、模态、推理类型）覆盖率的*系统审计*；以及随时间*提高基准获取能力*。参数 $\rho$ 表示每一轮评估中消除的偏见比例。
+
+::: {.callout-warning title="命题：分布校正下的对齐恢复"}
+在带分布校正的重复评估博弈下，构建者的最优策略收敛到最大化设计者效用：
+$$
+\theta^*_t \to \arg\max_{\theta \in \Theta} \frac{1}{|F|} \sum_{f \in F} f(\theta) = \arg\max_{\theta \in \Theta} u_E(\theta)
+$$
+其中 $\pi_E^{(t)} \to \text{Uniform}(F)$。
+:::
+
+*证明概略.* 在机制 $M$ 下，构建者的期望奖励为 $\mathbb{E}_{f \sim \pi_E^{(t)}}[f(\theta)]$。当 $\pi_E^{(t)} \to \text{Uniform}(F)$ 时，它收敛于 $(1/|F|) u_E(\theta)$。在极限情况下，构建者完全了解 $\pi_E = \text{Uniform}(F)$，但这一知识并不提供优势：为均匀分布进行优化本身就是设计者的目标。$\square$
+
+关键洞察在于*两个学习者之间的竞赛*：构建者从观测中学习 $\pi_E^{(t)}$，而评估者将 $\pi_E^{(t)}$ 向均匀分布校正。残余的不一致性取决于这两个过程的相对速率。
+
+::: {.callout-warning title="Proposition: Misalignment Bound"}
+设 $D_0 = \text{KL}(\pi_E^{(0)} \| \text{Uniform}(F))$ 且 $m_t = k \cdot \min(t, \rho^{-1})$ 为构建者的有效样本量。残余偏差满足：
+$$
+\Delta_t \leq \min\!\left(\underbrace{\frac{m_t}{m_t + |F|}}_{\text{estimation-limited}},\;\; \underbrace{(1-\rho)^t \sqrt{\frac{D_0}{2}}}_{\text{correction-limited}}\right)
+$$
+:::
+
+这两项捕捉了互补的机制：
+
+- **估计受限（$t$ 较小）**：$m_t \approx kt$，由此得到 $\Delta_t \lesssim kt/|F|$。构建者观测数据太少，无法识别评估者的偏差。
+- **修正受限（$t$ 较大）**：$\Delta_t \lesssim (1-\rho)^t \sqrt{D_0/2}$。构建者可能已经很好地了解了 $\pi_E^{(t)}$，但评估者的修正已将偏差推向零，没有可乘之机。
+
+*证明概要。* 修正受限项源于平斯克不等式：$\Delta_t \leq \text{TV}(\pi_E^{(t)}, \text{Uniform}(F)) \leq \sqrt{D_0/2}\,(1-\rho)^t$，因为总变差在线性插值下呈几何衰减。估计受限项源于贝叶斯收缩：构建者具有 $m_t$ 个观测和 Dirichlet$(1,\ldots,1)$ 先验时，其后验均值是从均匀分布到经验分布路径上的 $m_t/(m_t + |F|)$ 比例处。$\square$
+
+```{pyodide-python}
+#| label: distribution-correction
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+
+# --- Parameters ---
+N = 200
+n_rounds = 200
+k = 20
+rho_values = [0, 0.01, 0.05, 0.1, 0.2]
+n_trials = 20
+
+# Initial biased evaluator distribution
+pi_E_init = np.ones(N) / N
+pi_E_init[:int(0.4 * N)] *= 3.0
+pi_E_init /= pi_E_init.sum()
+
+# True task performance: each task has a "value"
+task_values = np.random.uniform(0.3, 0.9, N)
+
+colors = ['#888888', '#B07CD8', '#F0A35C', '#45BF7C', '#5B8DEE']
+
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+for ri, rho in enumerate(rho_values):
+    all_misalign = np.zeros((n_trials, n_rounds))
+    all_kl = np.zeros((n_trials, n_rounds))
+
+    for trial in range(n_trials):
+        pi_E = pi_E_init.copy()
+        uniform = np.ones(N) / N
+
+        for t in range(n_rounds):
+            # Correct distribution
+            if rho > 0:
+                pi_E = (1 - rho) * pi_E + rho * uniform
+
+            # Misalignment: total variation between pi_E and uniform
+            tv = 0.5 * np.sum(np.abs(pi_E - uniform))
+            all_misalign[trial, t] = tv
+
+            # KL divergence
+            mask = pi_E > 1e-15
+            kl = np.sum(pi_E[mask] * np.log(pi_E[mask] / uniform[mask]))
+            all_kl[trial, t] = kl
+
+    col = colors[ri]
+    rounds = np.arange(n_rounds)
+    label = f'ρ={rho}' if rho > 0 else 'ρ=0 (no correction)'
+
+    axes[0].plot(rounds, all_misalign.mean(axis=0), color=col, label=label, lw=1.5)
+    kl_mean = all_kl.mean(axis=0)
+    kl_mean = np.maximum(kl_mean, 1e-10)
+    axes[1].plot(rounds, kl_mean, color=col, label=label, lw=1.5)
+
+axes[0].set_xlabel('Round')
+axes[0].set_ylabel('Misalignment (TV distance)')
+axes[0].set_title('Residual misalignment')
+axes[0].legend()
+
+axes[1].set_xlabel('Round')
+axes[1].set_ylabel('KL divergence')
+axes[1].set_title('Distribution bias')
+axes[1].set_yscale('log')
+axes[1].legend()
+
+plt.tight_layout()
+plt.show()
+```
+
+**Figure.** 在分布校正下的对齐恢复，其中 $|F| = 200$ 且 $k = 20$。左：对于所有 $\rho > 0$，剩余未对齐收敛至零，更快的校正速率导致更快的收敛。$\rho = 0$ 基线（灰色）保持持续的未对齐。右：KL 散度在对数尺度上呈指数衰减，速率与 $\rho$ 成正比。
+
+### 最优评估规模 {#sec-optimal-k}
+
+随着分布校正，来自 @sec-pareto-frontier 的帕累托前沿瓦解。每个揭示的任务仅给构建者带来 *短暂* 的优势，因为它揭示的偏差会在 $O(1/\rho)$ 轮内被纠正。评估者的每轮损失分解为：
+$$
+\mathcal{L}(k) = \underbrace{\frac{\sigma^2}{k}}_{\text{evaluation variance}} + \underbrace{\frac{\gamma k}{\rho}}_{\text{steady-state exploitation}}
+$$
+
+第一项随 $k$ 增加而减小（更多任务，更少噪声）；第二项随 $k$ 增加而增大（更多任务，更快的构建者学习），并随 $\rho$ 增加而减小（更快的纠正，更短的利用窗口）。
+
+::: {.callout-warning title="命题：最优样本量"}
+给定纠正速率 $\rho > 0$ 和博弈惩罚 $\gamma > 0$，每轮评估任务的最优数量为：
+$$
+k^* = \sigma \sqrt{\frac{\rho}{\gamma}}
+$$
+且最小损失为 $\mathcal{L}(k^*) = 2\sigma\sqrt{\gamma/\rho}$。
+:::
+
+*证明.* 令 $\partial \mathcal{L}/\partial k = -\sigma^2/k^2 + \gamma/\rho = 0$ 得 $k^2 = \sigma^2 \rho / \gamma$，因此 $k^* = \sigma\sqrt{\rho/\gamma}$。二阶条件 $\partial^2 \mathcal{L}/\partial k^2 = 2\sigma^2/k^3 > 0$ 确认这是最小值。$\square$
+
+由此得出几个关键启示：
+
+- **$k^*$ 随 $\sqrt{\rho}$ 增加而增大：** 更快的纠正允许更大的评估集。纠正速度翻倍的评估者可以评估的任务数量大约增加 $\sqrt{2} \approx 1.4$ 倍。
+
+- **$k^*$ 随 $\sigma$ 增加而增大：** 更高的任务方差需要更多样本以获得可靠信号，这与静态情况相同。
+
+- **极限行为：** 当 $\rho \to 0$ 时（无纠正），$k^* \to 0$ —— 评估者应尽可能少地揭示任务。当 $\rho \to \infty$ 时（即时纠正），$k^* \to \infty$ —— 泄漏信息立刻过时。
+
+- **关键杠杆是 $\rho$：** 因为 $\mathcal{L}(k^*) = 2\sigma\sqrt{\gamma/\rho}$，评估者的 *最优* 损失按 $1/\sqrt{\rho}$ 减小。投资于分布校正（覆盖率审计、基准变更日志、事件驱动的任务添加）是基准设计中最有效的杠杆。
+
+```{pyodide-python}
+#| label: optimal-k-surface
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+sigma = 5.0
+gamma = 0.05
+rho_values = [0.05, 0.1, 0.2, 0.5]
+
+k_range = np.linspace(1, 80, 200)
+colors = ['#E8637A', '#F0A35C', '#45BF7C', '#5B8DEE']
+
+fig, ax = plt.subplots(1, 1, figsize=(3.5, 3))
+
+for i, rho in enumerate(rho_values):
+    loss = sigma**2 / k_range + gamma * k_range / rho
+    k_star = sigma * np.sqrt(rho / gamma)
+    loss_star = 2 * sigma * np.sqrt(gamma / rho)
+
+    ax.plot(k_range, loss, color=colors[i], lw=1.5, label=f'ρ={rho}')
+    ax.plot(k_star, loss_star, '*', color=colors[i], markersize=10, zorder=5)
+    ax.annotate(f'k*={k_star:.0f}', (k_star, loss_star),
+                textcoords='offset points', xytext=(8, 5), fontsize=6, color=colors[i])
+
+# Static case (rho -> 0): only variance term
+ax.plot(k_range, sigma**2 / k_range, '--', color='#888888', lw=1, label='ρ→0 (static)')
+
+ax.set_xlabel('Evaluation tasks per round (k)')
+ax.set_ylabel('Evaluator loss L(k)')
+ax.set_title('Optimal evaluation size')
+ax.legend()
+ax.set_ylim(0, 15)
+ax.set_xlim(0, 80)
+
+plt.tight_layout()
+plt.show()
+```
+
+**图.**  不同修正率下的评估者损失 $\mathcal{L}(k) = \sigma^2/k + \gamma k / \rho$，星号标记最优 $k^*$。更快的修正（较大的 $\rho$）使 $k^*$ 右移并降低最低损失。静态情况（$\rho \to 0$，虚线）单调递减，反映了没有修正时不可调和的权衡。参数：$\sigma = 5$，$\gamma = 0.05$。
+
+### 噪声门控的留出评估 {#sec-holdout}
+
+分布修正通过移动目标，使泄露的信息变得过时。一种互补的机制通过控制信息流，首先*阻止*泄露的发生。
+
+::: {.callout-note title="定义：留出评估机制"}
+评估者发布一个大小为 $n_0$ 的参考集 $S_0 \subset F$，从 $\pi_E$ 中采样。在每一轮 $t$ 中：
+
+1. 从 $\pi_E^{(t)}$ 中抽取大小为 $k$ 的留出集 $S_t$，并抽取噪声 $\xi_t \sim \text{Laplace}(0, 1/\varepsilon)$。
+2. 计算参考得分 $r_T(\theta_t) = \frac{1}{n_0}\sum_{f \in S_0} f(\theta_t)$ 和留出得分 $r_H(\theta_t) = \frac{1}{k}\sum_{f \in S_t} f(\theta_t)$。
+3. **阈值检验：** 如果 $|r_H(\theta_t) + \xi_t - r_T(\theta_t)| < \eta$，则发布 $r_T(\theta_t)$（“静默”轮次）。否则，发布 $r_H(\theta_t) + \xi_t$（“警报”轮次）。
+:::
+
+该机制是**自修正的**：当构建者表现良好时（$\Delta_{\text{game}} \approx 0$，因此警报仅因噪声而触发，概率为 $p_{\text{alarm}} = e^{-\varepsilon\eta}$），它暴露的信息较少；而当构建者进行博弈时（得分差异可靠地触发警报），暴露的信息较多。对于非博弈构建者，每轮的有效泄露量约为：
+$$
+\lambda_{\text{out}}^{\text{holdout}} \approx e^{-\varepsilon\eta} \cdot k
+$$
+
+设置 $\varepsilon\eta = 3$ 可使构建者的学习速率降低约 $20\times$，为评估者争取更多时间来进行分布修正。
+
+::: {.callout-warning title="为什么仅靠噪声无法替代分布修正"}
+留出机制减缓了构建者的学习，但并未改变其在已学习内容条件下的*激励*。无论添加多少拉普拉斯噪声，给定其后验 $\hat{\pi}_{E,t}$，构建者的最优策略仍然是 $\theta_t^* = \arg\max_\theta \mathbb{E}_{f \sim \hat{\pi}_{E,t}}[f(\theta)]$。如果 $\pi_E$ 是有偏且固定的，构建者最终会学习到这一偏差并据此专精。只有分布修正，即推动 $\pi_E^{(t)} \to \text{Uniform}(F)$，才能确保构建者最终的知识无法提供可利用的优势。这是与纯粹差分隐私的关键区别：差分隐私减慢学习；分布修正则消除了利用所学内容的*激励*。
+:::
+
+这里与差分隐私文献 [@dwork2015generalization; @dwork2014algorithmic] 相关联。保留集机制从稀疏向量算法继承了差分隐私保障，限制了构建者的观察结果与保留集之间的最大信息量。然而，差分隐私应对的是另一种威胁：它防止重构保留集中具体是哪些任务（对测试*集*的过拟合），而我们关心的是构建者学到了评估*分布*并据此进行特化。
+
+
+## 作为委托-代理问题的指标设计 {#sec-metric-design}
+
+我们现在从“展示哪些任务”转向“报告哪些指标”。即使评估机制设计得完美无缺，*指标的选择*也可能产生逆向激励。
+
+### 当指标产生逆向激励时 {#sec-perverse-incentives}
+
+医疗领域提供了一个生动的例证。2001年，纽约州卫生部开始公布心脏手术的医院死亡率。@dranove2003paying 记录了其后果：医院开始*回避*重症患者，而不是改进护理。通过将平均治疗结果（ATO）作为质量指标发布，该系统奖励了患者筛选而非治疗有效性。
+
+这与人工智能评估的情况直接相似。奖励平均基准得分的排行榜会激励开发者专攻简单基准或选择有利的评估条件，而不是全面改进。指标本身造成了错位。
+
+将其形式化为委托-代理问题 [@laffont1986using]：委托人（评估者）选择奖励函数 $w$，代理人（开发者）以策略 $\pi^w$ 做出最佳回应。委托人的遗憾值为 $R(\pi^w) = \max_{\tilde{\pi} \in \Pi} V(\tilde{\pi}) - V(\pi^w)$，其中 $V(\pi) = \mathbb{E}[Y(\pi) - Y(0)]$ 是总处理效应。
+
+::: {.callout-warning title="命题：ATO具有无界遗憾值"}
+平均治疗结果 $w_{\text{ATO}}(x, t, y) = y \cdot \mathbf{1}[t = 1]$ 可能具有无界遗憾值。一个最大化 $\mathbb{E}[w_{\text{ATO}}]$ 的代理人可能达到 $R(\pi^{w_{\text{ATO}}}) = \max_\pi V(\pi)$ —— *最差的* 可能策略。
+:::
+
+其直观含义是鲜明的：一家最大化平均治疗结果的医院会只选择最健康的患者进行治疗，取得了优异的ATO，但总处理效应为零（甚至为负）。在人工智能场景中，一个在所选任务上最大化平均基准准确率的开发者，可能只是将最难的基准从其评估套件中剔除。
+
+::: {.callout-warning title="命题：总处理效应实现零遗憾值"}
+当委托人拥有无偏反事实估计 $\hat{\mu}_0(x) = \mathbb{E}[Y(0) \mid X = x]$ 时，总处理效应指标 $w_{\text{TT}}(x, t, y) = y - \hat{\mu}_0(x)$ 实现零遗憾值。
+:::
+
+关键洞察：通过减去反事实基线（在没有干预的情况下会发生的情况），该度量消除了选择病人的动机。在 AI 评估中，这转化为对“能力提升”进行评分——相对于基线的表现——而不是原始表现。这与 @sec-causality 的双重稳健估计相关：反事实度量需要对如果没有开发人员努力表现*会怎样*进行因果推理。
+
+### 信息不对称与度量引出 {#sec-information-elicitation}
+
+除了度量选择，还有一个前置问题：开发人员应该*透露*多少关于其模型能力的信息？考虑一个拥有私人成本相关变量 $X$ 的开发人员（代理人）——例如，知道其模型在哪些能力维度上表现出色。评估者（委托人）可以在 $X$ 被揭示时设计基于 $X$ 的合同。
+
+根据 @wang2024relying 的信息引出框架，关键问题是：开发人员何时更倾向于透露、隐藏或*混淆*其能力信息？
+
+- **透露：** 开发人员完全披露 $X$。委托人设计针对性的合同，当信息能够实现有效分配时，这对双方都有利。
+- **隐藏：** 开发人员隐藏 $X$。委托人必须使用一刀切的合同，这虽然稳健但可能效率低下。
+- **混淆：** 开发人员披露 $X$ 的带噪版本。这种中间选项可能是帕累托改进。
+
+::: {.callout-warning title="命题：委托人总是从信息披露中获益"}
+委托人在信息披露下的期望效用弱高于隐藏情况：$V_P^{\text{reveal}} \geq V_P^{\text{conceal}}$.
+:::
+
+*证明梗概。* 在信息披露下，委托人的优化问题具有严格更大的可行集（基于 $X$ 的条件合同），所以最优解只会改善。$\square$
+
+但开发人员的激励更为微妙。当基于 $X$ 的调节能够充分区分高成本和低成本类型，从而允许委托人提供更有效的合同时，信息披露有帮助。当信息披露会导致委托人通过完美针对性的合同提取开发人员所有的剩余时，隐藏更受青睐。
+
+### 混淆作为差分隐私 {#sec-garbling-privacy}
+
+最有趣的情况是*混淆*：开发人员以概率 $\varepsilon$ 披露 $Y = X$，以概率 $1 - \varepsilon$ 披露 $Y = \xi$（噪声）。这正是差分隐私中的随机响应机制。
+
+::: {.callout-warning title="命题：混淆可以帕累托优于两种极端情况"}
+在相当广泛的条件下（例如，两个具有不同均值的指数成本类型），代理人可能更偏好混淆的披露，而不是完全隐藏或完全透露。此外，与隐藏相比，混淆可以增加总福利。
+:::
+
+直观而言，garbling（混淆）为主理人提供了*恰好足够*的信息，以便设计更优的契约，同时不会导致完全的剩余榨取。在AI评估的语境中，这对应于：
+
+- **带校准噪声的模型卡：**开发者披露近似的能力概况，而非精确的性能向量。
+- **指标报告中的差分隐私：**在报告的指标中添加拉普拉斯噪声，构成一种混淆机制。
+- **基准测试的透明度层级：**公开发布汇总分数，但仅通过隐私保护机制发布细粒度分解。
+
+这直接关联到 @sec-holdout 中的保留机制：两者都使用校准噪声来创造更优的激励均衡。这种并行性非常深刻——评估者对评估分布应揭示多少的决策，与开发者对模型能力应揭示多少的决策，是信息设计中的一对对偶问题。
+
+```{pyodide-python}
+#| label: agency-game
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize_scalar
+
+np.random.seed(42)
+
+# --- Agency game simulation ---
+# Two exponential cost types: lambda_0 (high cost), lambda_1 (low cost)
+lambda_0_range = np.linspace(0.5, 5.0, 30)
+lambda_1_range = np.linspace(0.5, 5.0, 30)
+
+# Principal's value from agent effort
+b = 2.0
+
+# Compute revelation advantage for agent
+V_diff = np.zeros((len(lambda_0_range), len(lambda_1_range)))
+
+for i, lam0 in enumerate(lambda_0_range):
+    for j, lam1 in enumerate(lambda_1_range):
+        # Prior: equal probability of each type
+        p0, p1 = 0.5, 0.5
+
+        # Under revelation: principal offers type-specific contracts
+        # Optimal effort for type k: e* = max(0, b - lambda_k)
+        # Agent surplus under reveal: E[max(0, w_k - C_k)] for targeted w_k
+        e_rev_0 = max(0, b - lam0)
+        e_rev_1 = max(0, b - lam1)
+        # Agent expected utility: wage minus expected cost
+        V_agent_rev = p0 * max(0, (b - lam0)**2 / (2*b)) + p1 * max(0, (b - lam1)**2 / (2*b))
+
+        # Under concealment: principal offers pooling contract
+        lam_pool = p0 * lam0 + p1 * lam1
+        e_con = max(0, b - lam_pool)
+        V_agent_con = max(0, (b - lam_pool)**2 / (2*b))
+
+        V_diff[i, j] = V_agent_rev - V_agent_con
+
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+# Panel 1: Heatmap of V_reveal - V_conceal
+im = axes[0].imshow(V_diff, extent=[lambda_1_range[0], lambda_1_range[-1],
+                                     lambda_0_range[-1], lambda_0_range[0]],
+                    aspect='auto', cmap='RdBu_r', vmin=-0.5, vmax=0.5)
+axes[0].set_xlabel('λ₁ (low-cost type)')
+axes[0].set_ylabel('λ₀ (high-cost type)')
+axes[0].set_title('Agent: V_reveal − V_conceal')
+axes[0].contour(lambda_1_range, lambda_0_range, V_diff,
+                levels=[0], colors='black', linewidths=1.5)
+plt.colorbar(im, ax=axes[0], shrink=0.8)
+
+# Panel 2: Agent utility under garbling (varying epsilon)
+lam0_fixed, lam1_fixed = 3.0, 1.0
+epsilons = np.linspace(0, 1, 100)
+V_garble = np.zeros(len(epsilons))
+
+for ei, eps in enumerate(epsilons):
+    # Under garbling: principal observes Y = X w.p. eps, Y = noise w.p. 1-eps
+    # Effective type distribution from principal's perspective
+    # Garbled: principal assigns probability
+    # P(type=0 | Y=0) = eps * p0 / (eps*p0 + (1-eps)*0.5)
+    # Simplified: interpolate between reveal and conceal
+    V_garble[ei] = eps * (0.5 * max(0, (b - lam0_fixed)**2 / (2*b)) +
+                          0.5 * max(0, (b - lam1_fixed)**2 / (2*b))) + \
+                   (1 - eps) * max(0, (b - 0.5*lam0_fixed - 0.5*lam1_fixed)**2 / (2*b))
+
+axes[1].plot(epsilons, V_garble, color='#5B8DEE', lw=2)
+axes[1].axhline(y=V_garble[0], color='#E8637A', ls='--', lw=1, label='Conceal')
+axes[1].axhline(y=V_garble[-1], color='#45BF7C', ls='--', lw=1, label='Reveal')
+best_eps = epsilons[np.argmax(V_garble)]
+axes[1].axvline(x=best_eps, color='#F0A35C', ls=':', lw=1, label=f'ε*={best_eps:.2f}')
+axes[1].set_xlabel('Garbling parameter ε')
+axes[1].set_ylabel('Agent utility')
+axes[1].set_title(f'Garbling (λ₀={lam0_fixed}, λ₁={lam1_fixed})')
+axes[1].legend()
+
+plt.tight_layout()
+plt.show()
+```
+
+**图.** 左图：代理人在揭示与隐瞒之间的净收益热力图，横跨成对的指数成本类型 $(\lambda_0, \lambda_1)$。红色区域表示代理人偏好揭示；蓝色区域表示偏好隐瞒。黑色等值线表示无差异。右图：在固定成本类型下，代理人因混淆（噪声披露，概率为 $\varepsilon$）而获得的效用。适中的混淆水平可能优于完全隐瞒和完全揭示。
+
+
+## 代表性基准选择 {#sec-representative-selection}
+
+一个独立但相关的设计问题是：给定大量的评估指标，如何选择一个具有代表性的子集？这就是BIG-bench（200+指标 $\to$ BIG-bench Lite，24个指标）、HELM（$\to$ HELM Lite）和加州医院比较（数百项质量指标 $\to$ 12项）所面临的“精简基准”问题。
+
+### 子集选择问题 {#sec-subset-selection}
+
+设有 $n$ 个指标和 $m$ 个备选方案（模型）。每个指标 $i$ 对备选方案产生一个排序 $\sigma_i$。我们希望找到一个指标子集 $K \subseteq N = [n]$，该子集能够“代表”整个集合 $N$。但“代表”在形式上意味着什么？@procaccia2025metritocracy 的工作提供了两个基于社会选择理论的精确定义。
+
+### 位置代表性 {#sec-positional-representation}
+
+第一种概念旨在防止在每个排名截断点出现*代表性不足*的问题。
+
+::: {.callout-note title="Definition: Positional Representation"}
+一个子集 $K$ 对于组大小 $g$ 满足**位置代表性**，如果对于每个排名截断点 $r \in [m]$ 和每个备选方案 $a$：
+$$
+C(K, r, a) \geq \left\lfloor \frac{C(N, r, a)}{g} \right\rfloor
+$$
+其中 $C(S, r, a) = |\{i \in S : \sigma_i(a) \leq r\}|$ 统计了在 $S$ 中将备选方案 $a$ 排在前 $r$ 位的指标数量。
+:::
+
+换句话说：如果备选方案 $a$ 在 $N$ 中被至少 $\ell \cdot g$ 个指标排在前 $r$ 位，那么 $a$ 必须在 $K$ 中被至少 $\ell$ 个指标排在前 $r$ 位。参数 $g$ 控制着代表性的粒度——较小的 $g$ 需要更精细的代表性，但要求更大的 $|K|$。
+
+::: {.callout-warning title="Theorem: Positional Representation Bounds"}
+保证位置代表性所需的最小子集规模满足：
+$$
+\Omega\!\left(\frac{n}{g} \cdot \frac{\log m}{\log(n \log m / g)}\right) \leq |K| \leq O\!\left(\frac{n}{g} \log m\right)
+$$
+上界可通过基于集合覆盖的多项式时间贪心算法（@procaccia2025metritocracy 中的算法1）达到。
+:::
+
+该贪心算法的工作方式如下：逐行遍历偏好配置，当选备方案累积 $g$ 次出现时对条目进行着色。然后贪心地选择覆盖剩余颜色最多的指标。与集合覆盖的联系导致了对数因子。
+
+### 位置比例性 {#sec-positional-proportionality}
+
+位置表示法防止了代表性不足，但并未防止过度代表。一个更强的概念可同时防止两者：
+
+::: {.callout-note title="定义：位置比例性"}
+一个子集 $K$ 满足 **$\epsilon$-位置比例性**，如果对于每个备选项 $a$ 和每个排名截断 $r$：
+$$
+\left| \frac{C(N, r, a)}{|N|} - \frac{C(K, r, a)}{|K|} \right| \leq \epsilon
+$$
+:::
+
+这保留了在每个位置上将每个备选项排名的指标 *比例*，直至加性误差 $\epsilon$。
+
+::: {.callout-warning title="定理：位置比例性界限"}
+满足 $\epsilon$-位置比例性的最小子集大小满足：
+$$
+\Omega\!\left(\frac{1}{\epsilon^2} \log m\right) \leq |K| \leq O\!\left(\frac{1}{\epsilon^2} \log m\right)
+$$
+这些界限在常数因子内是紧的。
+:::
+
+这些紧界源于与均匀收敛的联系：一个大小为 $O(\epsilon^{-2} \log m)$ 的随机子集以高概率满足位置比例性，通过同时应用于所有 $O(m)$ 个备选项和排名截断的切诺夫型论证。
+
+一个特别有用的推论将比例性与评分规则联系起来：
+
+::: {.callout-warning title="定理：评分规则近似"}
+如果 $K$ 满足 $\epsilon$-位置比例性，那么对于任意具有得分向量 $s$ 的评分规则和每个备选项 $a$：
+$$
+|f_s(a, \sigma_N) - f_s(a, \sigma_K)| \leq \epsilon
+$$
+其中 $f_s(a, \sigma_S) = \frac{1}{|S|} \sum_{i \in S} s_{\sigma_i(a)}$ 是在指标集 $S$ 中备选项 $a$ 在评分规则 $s$ 下的平均得分。
+:::
+
+这一关键的实际保证：一个满足位置比例性的子集近似了原始指标集上的 *任何* 评分规则。与 @sec-dimensionality 的联系是直接的：位置比例性为“精简”基准何时保留整套基准相同信息提供了一个形式化标准，补充了因子模型的维度分析。
+
+```{pyodide-python}
+#| label: positional-representation
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(42)
+
+# --- Generate synthetic benchmark data ---
+n_metrics = 50    # full set
+m_models = 20     # alternatives
+
+# Generate random rankings: each metric produces a permutation
+rankings = np.zeros((n_metrics, m_models), dtype=int)
+for i in range(n_metrics):
+    rankings[i] = np.random.permutation(m_models)
+
+def count_top_r(rankings, subset, r, a):
+    """Count how many metrics in subset rank alternative a in top r."""
+    return sum(1 for i in subset if rankings[i, a] < r)
+
+def greedy_positional_representation(rankings, g):
+    """Greedy algorithm for positional representation."""
+    n, m = rankings.shape
+
+    # Phase 1: Color entries
+    colors = {}
+    color_id = 0
+    alt_counts = {a: [] for a in range(m)}  # track uncolored positions per alt
+
+    for r in range(m):
+        for a in range(m):
+            entries = [(i, r) for i in range(n) if rankings[i, a] == r]
+            for (i, pos) in entries:
+                alt_counts[a].append((i, pos))
+                if len(alt_counts[a]) >= g:
+                    for (mi, mp) in alt_counts[a][-g:]:
+                        colors[(mi, a, mp)] = color_id
+                    color_id += 1
+                    alt_counts[a] = []
+
+    # Phase 2: Greedy set cover
+    K = set()
+    all_colors = set(colors.values())
+    remaining = all_colors.copy()
+
+    metric_colors = {i: set() for i in range(n)}
+    for (mi, a, pos), c in colors.items():
+        metric_colors[mi].add(c)
+
+    while remaining:
+        best_metric = max(range(n), key=lambda i: len(metric_colors[i] & remaining) if i not in K else -1)
+        if len(metric_colors[best_metric] & remaining) == 0:
+            break
+        K.add(best_metric)
+        remaining -= metric_colors[best_metric]
+
+    return K
+
+# --- Run for different group sizes ---
+g_values = [2, 3, 5, 8, 10, 15, 20, 25]
+greedy_sizes = []
+random_sizes = []
+
+for g in g_values:
+    K = greedy_positional_representation(rankings, g)
+    greedy_sizes.append(len(K))
+
+    # Random baseline: how many random metrics needed?
+    n_trials_rand = 50
+    rand_needed = []
+    for _ in range(n_trials_rand):
+        perm = np.random.permutation(n_metrics)
+        for size in range(1, n_metrics + 1):
+            K_rand = set(perm[:size])
+            # Check positional representation
+            satisfied = True
+            for r in range(m_models):
+                for a in range(m_models):
+                    c_full = count_top_r(rankings, range(n_metrics), r, a)
+                    c_sub = count_top_r(rankings, K_rand, r, a)
+                    if c_sub < c_full // g:
+                        satisfied = False
+                        break
+                if not satisfied:
+                    break
+            if satisfied:
+                rand_needed.append(size)
+                break
+        else:
+            rand_needed.append(n_metrics)
+    random_sizes.append(np.mean(rand_needed))
+
+# --- Plot ---
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+colors_plot = ['#5B8DEE', '#E8637A', '#45BF7C']
+
+axes[0].plot(g_values, greedy_sizes, 'o-', color=colors_plot[0], lw=1.5, markersize=4, label='Greedy')
+axes[0].plot(g_values, random_sizes, 's--', color=colors_plot[1], lw=1.5, markersize=4, label='Random')
+axes[0].plot(g_values, [n_metrics/g * np.log(m_models) for g in g_values], ':',
+             color='#888888', lw=1, label='(n/g)·log(m) bound')
+axes[0].set_xlabel('Group size g')
+axes[0].set_ylabel('Selected subset size |K|')
+axes[0].set_title('Positional representation')
+axes[0].legend()
+
+# Panel 2: Show ranking preservation for the g=5 case
+K_example = greedy_positional_representation(rankings, g=5)
+K_list = sorted(K_example)
+
+# Top-5 ranking of each model: fraction of metrics ranking it in top 5
+top_r = 5
+frac_full = np.array([count_top_r(rankings, range(n_metrics), top_r, a) / n_metrics
+                       for a in range(m_models)])
+frac_subset = np.array([count_top_r(rankings, K_list, top_r, a) / len(K_list)
+                         for a in range(m_models)])
+
+sort_idx = np.argsort(-frac_full)
+x = np.arange(m_models)
+w = 0.35
+axes[1].bar(x - w/2, frac_full[sort_idx], w, color=colors_plot[0], alpha=0.7, label=f'Full (n={n_metrics})')
+axes[1].bar(x + w/2, frac_subset[sort_idx], w, color=colors_plot[2], alpha=0.7, label=f'Subset (|K|={len(K_list)})')
+axes[1].set_xlabel('Model (sorted)')
+axes[1].set_ylabel(f'Fraction in top {top_r}')
+axes[1].set_title(f'Top-{top_r} preservation (g=5)')
+axes[1].legend()
+axes[1].set_xticks([])
+
+plt.tight_layout()
+plt.show()
+```
+
+**图.** 左：在不同组大小 $g$ 下，贪心算法为位置表示所需的子集大小 $|K|$，与随机选择及理论界 $O(n/g \cdot \log m)$ 的对比。贪心算法始终优于随机选择。右：当 $g=5$ 时，比较完整集合（$n=50$）与贪心选择的子集中，将每个模型排入前 5 名的指标比例。子集紧密地保留了排名结构。
+
+
+## 综合：策略性基准的设计原则 {#sec-design-principles}
+
+本章的三条线索——信息设计、指标设计和代表性选择——收敛为六条可操作的 AI 评估设计原则。
+
+| 原则 | 形式基础 | 建议 |
+|-----------|-------------|----------------|
+| **1. 随机化与刷新** | 定理 1（一次性对齐），命题（确定性失效） | 使用任务更新的随机化评估。静态基准从构造上就易受古德哈特定律影响。 |
+| **2. 纠错与增长** | 命题（对齐恢复），命题（最优 $k^*$） | 将分布纠正（$\rho$）作为主要杠杆。最优 $k^*$ 与 $\sqrt{\rho}$ 成比例。 |
+| **3. 控制信息发布** | 保留机制，命题（学习减速） | 使用阈值测试，根据构建者行为调节信息流。与分布纠正相结合。 |
+| **4. 将指标与福利对齐** | 命题（ATO 遗憾），命题（TT 零遗憾） | 对总处理效应评分，而非平均值。考虑反事实基线。 |
+| **5. 允许部分透明** | 命题（混淆占优） | 指标报告中的校准噪声（混淆）可以带来相比完全透明和完全不透明均帕累托改进的效果。 |
+| **6. 确保代表性子集** | 定理（位置表示/比例界限） | 在创建轻量基准时，使用形式化的代表性标准，而非临时选择。 |
+
+: 策略性 AI 评估的六项设计原则 {#tbl-design-principles}
+
+这些原则以重要的方式相互作用。原则 1--3 针对*信息渠道*（评估者透露了多少评估机制）。原则 4 针对*指标渠道*（评估者测量了什么）。原则 5 针对*开发者渠道*（开发者透露了关于其模型的哪些信息）。原则 6 针对*范围渠道*（应包含哪些指标）。
+
+一个设计良好的评估系统应同时在所有四个渠道上运作：随机化任务选择（原则 1），投资于分布纠正（原则 2），通过保留机制控制信息发布（原则 3），使用福利对齐的指标（原则 4），允许开发者通过隐私保护机制进行披露（原则 5），并确保指标套装是形式化代表性的（原则 6）。
+
+
+## 讨论问题 {#sec-design-discussion}
+
+1. 评估博弈框架假设评估者是 *善意的*（社会规划者）。如果评估者也有策略性激励——例如，一家公司运行自己的基准测试以偏袒自己的模型——会有什么变化？
+
+2. 信息-方差权衡与 @sec-reliability 和 @sec-validity 中的信度-效度权衡有何关联？$\sigma^2/k$（评估方差）与克隆巴赫 $\alpha$ 之间是否存在形式上的联系？
+
+3. 能否设计一种机制，使构建者的激励是改进 *最难* 的任务而非平均水平的任务？你会如何修改 $u_E(\theta)$ 和 $r(\theta, S)$？
+
+4. 在何种意义上，Chatbot Arena 是一个随机化评估机制？它满足定理 1 的条件吗？自适应匹配过程会泄露哪些信息？
+
+5. 政府监管机构应如何为安全基准设定 $\gamma$（博弈惩罚）？哪些因素会影响这一选择？
+
+6. 如果两个“简化”基准都满足与同一 $\epsilon$ 的 $\epsilon$-位置比例性，但选择了不同的子集，应优先选择哪一个？哪些附加标准可用于打破平局？
+
+7. 保留机制借鉴了差分隐私。保留机制中的隐私预算 $\varepsilon$ 与数据隐私文献中 $\varepsilon$-差分隐私的概念之间有什么关系？
+
+8. 分布校正要求评估者“了解自己的偏差”。评估者如何识别自己在任务空间中哪些区域代表性不足？元评估和覆盖率审计扮演什么角色？
+
+
+## 文献注释 {#sec-design-biblio}
+
+斯塔克尔伯格评估博弈与信息-方差权衡在 @truong2025guard 中提出。分布校正机制与最优评估规模结果来自同一工作。将指标设计作为委托-代理问题的分析借鉴了 @wang2024relying，该研究提出了反事实质量指标（第 5 章）与代理博弈中的信息诱导（第 6 章）。位置代表性与比例性框架来自 @procaccia2025metritocracy。
+
+**古德哈特定律**（Goodhart's Law）由 @goodhart1984problems 在货币政策背景下阐述。@manheim2018categorizing 将其形式化为四种变体。与 RLHF 中奖励过度优化的联系由 @gao2023scaling 探索。
+
+**策略性分类**（Strategic classification）——研究代理人为获得有利分类结果而操纵其特征的行为——由 @hardt2016strategic 正式化。@perdomo2020performative 引入了展演预测，即模型自身改变数据分布。@braverman2020role 证明在策略性行为下，随机性是高效分类的必要条件。
+
+**贝叶斯劝说** [@kamenica2011bayesian] 提供了将评估者信息披露与构建者行为联系起来的信息设计框架。@bergemann2019information 综述了更广泛的信息设计文献。**契约理论** [@laffont1986using; @holmstrom1991multitask] 为度量设计提供了委托-代理基础。
+
+**差分隐私和自适应数据分析** [@dwork2015generalization; @dwork2014algorithmic] 为保留机制提供了基础。@blum2015ladder 将可重复使用的保留技术应用于机器学习竞赛。DP与策略稳健性之间的联系在保留机制分析中得到了阐述。
+
+**社会选择和基准测试** 与 @zhang2024inherent（基准的阿罗不可能性）、@colombo2022what（基准聚合的波达计数）和 @rofin2022votenrank（基准排序的评分规则）相关联。委员会选择文献，特别是正当代表 [@aziz2017justified]，为位置代表提供了社会选择基础。
+
+
+## 练习 {#sec-design-exercises}
+
+1. **（简单）** 证明若 $\pi_E = \text{Uniform}(F)$，则任意样本量 $k$（不仅限于 $k = 1$）下一次对齐定理均成立。*提示：* 证明对于任一 $k$-子集机制，期望奖励与 $u_E(\theta)$ 成比例。
+
+2. **（简单）** 验证 $k^* = \sigma\sqrt{\rho/\gamma}$ 最小化 $\mathcal{L}(k) = \sigma^2/k + \gamma k/\rho$。求 $\mathcal{L}(k^*)$。当 $\gamma$ 加倍时，$k^*$ 如何变化？
+
+3. **（中等）** 使用 $F$ 上分布的 Dirichlet$(1, \ldots, 1)$ 先验及 $m$ 个有效观测，推导错位界中的估计受限项。证明后验预测为收缩估计量 $\hat{\pi}_E = \frac{m}{m+N}\hat{p} + \frac{N}{m+N}\text{Uniform}(F)$，并证明 $\text{TV}(\hat{\pi}_E, \text{Uniform}(F)) \leq m/(m+N)$。
+
+4. **（中等）** 在二元 $X$ 的代理博弈中，假设 $C \mid X=0 \sim \text{Exp}(\lambda_0)$，而 $C \mid X=1$ 成本为零。推导 $\lambda_0$ 和委托人价值 $b$ 满足的条件，使得代理人偏好隐瞒而非披露。
+
+5. **（中等）** 证明任何满足 $\epsilon$-位置比例性的子集 $K$ 均可在 $\epsilon$ 内近似任意评分规则。*提示：* 将 $f_s(a, \sigma_S)$ 写为累积计数 $C(S, r, a)/|S|$ 的加权和，并应用阿贝尔求和。
+
+6. **（困难）** 将一次对齐定理推广至构建者对 $F$ 具有非均匀先验 $p_M$ 的情形。证明构建者的最优响应最大化 $\mathbb{E}_{f \sim p_M}[f(\theta)]$。在什么条件下，这与最大化 $u_E(\theta)$ 一致？
+
+7. **（困难）** 证明保留机制使构建者的后验集中速度减慢 $e^{\varepsilon\eta}$ 倍。*提示：* 计算有效样本量 $m_t^{\text{holdout}} = n_0 + p_{\text{alarm}} \cdot k \cdot \min(t, \rho^{-1})$ 并与 $m_t^{\text{baseline}}$ 进行比较。
+
+8. **(困难，计算性)** 在 HELM Lite 数据（或一个包含 $n = 100$ 个指标、$m = 50$ 个模型的合成数据集）上实现用于位置表示的贪心算法。对于不同的组大小 $g$，比较 $|K|$ 与现有的精简基准子集的大小。在多大的 $g$ 下，贪心算法会与现有子集的大小相匹配？

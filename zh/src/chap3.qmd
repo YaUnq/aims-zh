@@ -1,0 +1,1357 @@
+﻿---
+format:
+  html:
+    include-after-body:
+      text: |
+        <script>
+        // Auto-execute all pyodide cells after initialization
+        document.addEventListener('DOMContentLoaded', function() {
+          // Wait for pyodide to be fully ready (mainPyodide is set after loading)
+          function waitForPyodide() {
+            if (typeof globalThis.mainPyodide !== 'undefined' && globalThis.mainPyodide) {
+              // Pyodide is ready, execute all cells with autorun=true
+              if (typeof globalThis.qpyodideCellDetails !== 'undefined') {
+                globalThis.qpyodideCellDetails.forEach((cell, index) => {
+                  if (cell.options && cell.options.autorun === 'true') {
+                    setTimeout(() => {
+                      const runButton = document.querySelector(`#qpyodide-button-run-${cell.id}`);
+                      if (runButton && !runButton.disabled) {
+                        runButton.click();
+                      }
+                    }, index * 1000); // Stagger execution by 1 second each
+                  }
+                });
+              }
+            } else {
+              setTimeout(waitForPyodide, 500);
+            }
+          }
+          setTimeout(waitForPyodide, 2000); // Start checking after 2 seconds
+        });
+        </script>
+filters:
+  - pyodide
+pyodide:
+  packages:
+    - numpy
+    - matplotlib
+    - scipy
+---
+
+# 学习 {#sec-learning}
+
+::: {.callout-note title="预期学习成果"}
+通过本章学习，你将能够：
+
+1. **推导** Rasch模型的对数似然函数，并解释被试参数和题目参数的作用。
+2. **实现** 使用梯度下降和L-BFGS优化对IRT模型进行最大似然估计（MLE）。
+3. **解释** IRT中的可识别性问题，并描述标准解决方案（和为零、固定锚点）。
+4. **区分** 联合MLE、条件MLE和边际MLE，并说明其适用情形。
+5. **实现** 用于Rasch模型估计的期望最大化（EM）算法，并解释E步和M步。
+6. **描述** IRT模型的贝叶斯推断，并为能力和题目参数指定合适的先验分布。
+7. **实现** IRT模型的MAP估计和MCMC采样。
+8. **解释** IRT中的正则化作为贝叶斯先验，并应用交叉验证进行超参数选择。
+9. **应用** MLE和贝叶斯方法于真实AI基准测试数据，并比较其效率。
+10. **评估** 学习到的因子模型在各种掩码方案下的泛化能力（逐项掩码、按行保留、按列保留）。
+:::
+
+::: {.callout-tip title="建议授课计划" collapse="true"}
+本章可在 **3 次讲座**（每次75-90分钟）内完成：
+
+**第1讲：估计基础**
+
+- 为什么学习对AI测量至关重要（15分钟）
+- Rasch模型的似然与对数似然（20分钟）
+- 梯度推导与解释（20分钟）
+- 动手实践：使用模拟数据进行MLE（20分钟）
+
+**第2讲：高级估计方法**
+
+- 可识别性及条件MLE与边际MLE（20分钟）
+- 用于IRT的EM算法（30分钟）
+- 动手实践：EM实现（25分钟）
+
+**第3讲：贝叶斯方法与泛化**
+
+- IRT的先验设定（15分钟）
+- MAP估计与MCMC（30分钟）
+- 正则化与交叉验证（15分钟）
+- 泛化实验与掩码方案（15分钟）
+:::
+
+::: {.callout-note title="符号说明"}
+本章引入估计符号：$\ell(\theta, \beta)$（对数似然），$\hat{\theta}_{\text{MLE}}$ 和 $\hat{\theta}_{\text{MAP}}$（点估计），$\pi(\theta)$（先验），以及 $\eta$（学习率）。完整符号参考见[符号附录](notation.qmd)。
+:::
+
+::: {.callout-tip title="视频概览" collapse="false"}
+本章关键概念的可视化导览——从最大似然估计和EM算法到贝叶斯推断与泛化。
+
+{{< video ../animations/ch2/chapter2_narrated.mp4 >}}
+:::
+
+## 为什么学习对AI测量至关重要 {#sec-why-learning}
+
+第1章介绍了测量模型——Rasch模型、2PL模型、因子模型——它们描述了潜在能力如何生成观测到的回答。但仅仅知道模型的*形式*是不够的。要真正*使用*这些模型进行AI评估，我们必须从数据中估计其参数。
+
+::: {.callout-important title="AI测量中的核心学习问题"}
+给定一个响应矩阵 $Y \in \{0,1\}^{N \times M}$，其中 $Y_{ij} = 1$ 表示模型 $i$ 正确回答了问题 $j$：
+
+$$
+\text{Find } \hat{\theta}, \hat{\beta} = \arg\max_{\theta, \beta} P(Y \mid \theta, \beta)
+$$
+
+该优化问题是所有心理测量估计的基础，并为可信的AI评估奠定了基础。
+:::
+
+参数估计在AI测量中具有以下几个关键作用：
+
+1. **公平比较：** 校准后的题目难度使我们能够比较在不同问题子集上测试的模型。如果我们知道题目A比题目B更难，就可以恰当地加权它们对最终分数的贡献。
+
+2. **不确定性量化：** 估计过程不仅提供点估计，还提供标准误差，告诉我们应对测量结果抱有多大信心。
+
+3. **自适应测试：** 一旦我们校准了题目参数，就可以为每个模型选择最具信息量的问题，从而大幅降低评估成本（关于计算机自适应测试的完整论述请参见第3章）。
+
+4. **预测：** 通过已学习的参数，我们可以预测模型在从未见过的问题上的表现，从而实现对新基准的高效评估。
+
+本章重点讨论**被动学习**：给定一个固定数据集，同时估计所有参数。这包括最大似然估计 (MLE)、期望最大化 (EM) 和贝叶斯推断。我们还介绍了泛化实验，以评估已学习模型迁移到未见数据上的效果。关于基准测试中应包含*哪些*题目的设计，包括主动题目选择，将是第3章的主题。
+
+
+## 最大似然估计 {#sec-mle}
+
+最大似然估计是IRT中参数估计的基础。其原理很简单：找到使观测数据最可能出现的参数值。
+
+### 似然函数 {#sec-likelihood}
+
+回顾第1章，Rasch模型将正确回答的概率指定为：
+
+$$
+P(Y_{ij} = 1 \mid \theta_i, \beta_j) = \sigma(\theta_i - \beta_j) = \frac{1}{1 + e^{-(\theta_i - \beta_j)}}
+$$ {#eq-rasch-prob}
+
+其中 $\theta_i$ 是模型 $i$ 的能力，$\beta_j$ 是题目 $j$ 的难度。
+
+在*局部独立性*假设下---即各响应在给定潜在参数时是条件独立的---整个响应矩阵的似然为：
+
+$$
+L(\theta, \beta \mid Y) = \prod_{i=1}^N \prod_{j=1}^M P(Y_{ij} \mid \theta_i, \beta_j)^{Y_{ij}} [1 - P(Y_{ij} \mid \theta_i, \beta_j)]^{1-Y_{ij}}
+$$ {#eq-likelihood}
+
+取对数（为了计算稳定性和数学便利性）：
+
+$$
+\ell(\theta, \beta) = \sum_{i=1}^N \sum_{j=1}^M \left[ Y_{ij}(\theta_i - \beta_j) - \log(1 + e^{\theta_i - \beta_j}) \right]
+$$ {#eq-log-likelihood}
+
+这就是我们要最大化的目标函数。
+
+
+### 梯度推导 {#sec-gradient}
+
+为了优化对数似然，我们需要其梯度。求偏导数：
+
+$$
+\frac{\partial \ell}{\partial \theta_i} = \sum_{j=1}^M \left[ Y_{ij} - \sigma(\theta_i - \beta_j) \right]
+$$ {#eq-gradient-theta}
+
+$$
+\frac{\partial \ell}{\partial \beta_j} = \sum_{i=1}^N \left[ \sigma(\theta_i - \beta_j) - Y_{ij} \right]
+$$ {#eq-gradient-beta}
+
+::: {.callout-note title="梯度的直观解释"}
+梯度 $\frac{\partial \ell}{\partial \theta_i} = \sum_j [Y_{ij} - P_{ij}]$ 有一个优美的解释：
+
+- $Y_{ij}$ 是 **观测到的** 响应（0 或 1）
+- $P_{ij} = \sigma(\theta_i - \beta_j)$ 是 **预测的** 概率
+
+梯度仅仅是 **残差** 之和：观测值减去预测值。如果模型 $i$ 的表现优于预期（正确答案比预测的多），残差为正，我们就增加 $\theta_i$。如果表现不如预期，我们就减小 $\theta_i$。这就是梯度上升的本质。
+:::
+
+
+### 使用梯度下降的实现 {#sec-gd-implementation}
+
+我们在合成数据上通过梯度下降实现 MLE。首先，我们从已知参数生成响应矩阵：
+
+{{< include _plt_setup.qmd >}}
+
+```{pyodide-python}
+#| label: synthetic-data
+#| autorun: true
+#| fig-cap: "由已知Rasch模型参数生成的合成响应矩阵。"
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+def sigmoid(x):
+    """Numerically stable sigmoid function."""
+    return np.where(x >= 0,
+                    1 / (1 + np.exp(-x)),
+                    np.exp(x) / (1 + np.exp(x)))
+
+# Set seed for reproducibility
+np.random.seed(42)
+
+# True parameters
+N, M = 100, 50  # 100 models, 50 questions
+theta_true = np.random.normal(0, 1, N)  # True abilities
+beta_true = np.random.normal(0, 1.5, M)  # True difficulties
+
+# Generate response matrix via Rasch model
+prob_matrix = sigmoid(theta_true[:, None] - beta_true[None, :])
+Y = (np.random.random((N, M)) < prob_matrix).astype(int)
+
+print(f"Response matrix shape: {Y.shape}")
+print(f"Overall accuracy: {Y.mean():.3f}")
+print(f"Model accuracies range: [{Y.mean(axis=1).min():.3f}, {Y.mean(axis=1).max():.3f}]")
+print(f"Item difficulties range: [{Y.mean(axis=0).min():.3f}, {Y.mean(axis=0).max():.3f}]")
+
+# Visualize
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+# Raw response matrix
+axes[0].imshow(Y, aspect='auto', cmap='Blues')
+axes[0].set_xlabel('Questions')
+axes[0].set_ylabel('Models')
+axes[0].set_title('Raw Response Matrix')
+
+# Sorted by ability and difficulty
+row_order = np.argsort(Y.mean(axis=1))[::-1]
+col_order = np.argsort(Y.mean(axis=0))[::-1]
+Y_sorted = Y[row_order][:, col_order]
+axes[1].imshow(Y_sorted, aspect='auto', cmap='Blues')
+axes[1].set_xlabel('Questions (sorted by difficulty)')
+axes[1].set_ylabel('Models (sorted by ability)')
+axes[1].set_title('Sorted Response Matrix')
+
+plt.tight_layout()
+plt.show()
+```
+
+现在我们通过梯度下降实现最大似然估计（MLE）：
+
+```{pyodide-python}
+#| label: mle-gradient-descent
+#| autorun: true
+#| fig-cap: "Rasch模型最大似然估计的梯度下降收敛性"
+
+def rasch_log_likelihood(theta, beta, Y):
+    """Compute Rasch model log-likelihood."""
+    logits = theta[:, None] - beta[None, :]
+    ll = (Y * logits - np.log(1 + np.exp(np.clip(logits, -500, 500)))).sum()
+    return ll
+
+def rasch_gradients(theta, beta, Y):
+    """Compute gradients for theta and beta."""
+    P = sigmoid(theta[:, None] - beta[None, :])
+    grad_theta = (Y - P).sum(axis=1)
+    grad_beta = (P - Y).sum(axis=0)
+    return grad_theta, grad_beta
+
+# Initialize parameters at zero
+theta_hat = np.zeros(N)
+beta_hat = np.zeros(M)
+
+# Gradient ascent
+learning_rate = 0.01
+n_iterations = 500
+ll_history = []
+
+for iteration in range(n_iterations):
+    # Compute gradients
+    grad_theta, grad_beta = rasch_gradients(theta_hat, beta_hat, Y)
+
+    # Update parameters
+    theta_hat = theta_hat + learning_rate * grad_theta
+    beta_hat = beta_hat + learning_rate * grad_beta
+
+    # Re-center for identification (sum-to-zero constraint)
+    theta_hat = theta_hat - theta_hat.mean()
+    beta_hat = beta_hat - beta_hat.mean()
+
+    # Track log-likelihood
+    ll = rasch_log_likelihood(theta_hat, beta_hat, Y)
+    ll_history.append(ll)
+
+# Plot convergence
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+# Convergence curve
+axes[0].plot(ll_history)
+axes[0].set_xlabel('Iteration')
+axes[0].set_ylabel('Log-likelihood')
+axes[0].set_title('Gradient Ascent Convergence')
+axes[0].grid(True, alpha=0.3)
+
+# Compare ability estimates to true values
+theta_true_centered = theta_true - theta_true.mean()
+axes[1].scatter(theta_true_centered, theta_hat, alpha=0.6)
+axes[1].plot([-3, 3], [-3, 3], 'k--', alpha=0.5, label='y=x')
+axes[1].set_xlabel('True ability (centered)')
+axes[1].set_ylabel('Estimated ability')
+axes[1].set_title('Recovery of Abilities')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+# Compare difficulty estimates to true values
+beta_true_centered = beta_true - beta_true.mean()
+axes[2].scatter(beta_true_centered, beta_hat, alpha=0.6, color='orange')
+axes[2].plot([-4, 4], [-4, 4], 'k--', alpha=0.5, label='y=x')
+axes[2].set_xlabel('True difficulty (centered)')
+axes[2].set_ylabel('Estimated difficulty')
+axes[2].set_title('Recovery of Difficulties')
+axes[2].legend()
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Correlation with true values
+corr_theta = np.corrcoef(theta_true_centered, theta_hat)[0, 1]
+corr_beta = np.corrcoef(beta_true_centered, beta_hat)[0, 1]
+print(f"Correlation with true abilities: {corr_theta:.4f}")
+print(f"Correlation with true difficulties: {corr_beta:.4f}")
+```
+
+
+### 可识别性问题 {#sec-identifiability}
+
+::: {.callout-warning title="可识别性问题"}
+Rasch 模型存在一个基本的可识别性问题：如果我们将所有能力和所有难度同时加上一个常数 $c$，似然函数保持不变：
+
+$$
+P(Y_{ij}=1 \mid \theta_i + c, \beta_j + c) = \sigma((\theta_i + c) - (\beta_j + c)) = \sigma(\theta_i - \beta_j)
+$$
+
+参数只能确定到相差一个可加常数，这意味着无限多组参数值会产生相同的似然。
+
+**常见解决方案：**
+
+1. **总和为零约束：** 令 $\sum_i \theta_i = 0$ 或 $\sum_j \beta_j = 0$
+2. **固定锚点：** 将一个参数（如 $\beta_1 = 0$）设为参考值
+3. **先验约束：** 使用以零为中心的贝叶斯先验
+
+对于 AI 基准测试，我们通常采用总和为零的约束：能力 $\theta = 0$ 的模型相对于校准样本具有“平均”水平。
+:::
+
+如果不解决可识别性问题，梯度下降可能会无限漂移。我们实现中的重新中心化步骤能确保参数保持锚定。
+
+
+### L‑BFGS 优化 {#sec-lbfgs}
+
+虽然梯度下降直观易懂，但像 L‑BFGS 这样的拟牛顿法通过逼近二阶信息，收敛速度会快得多：
+
+```{pyodide-python}
+#| label: lbfgs-optimization
+#| autorun: true
+#| fig-cap: "L-BFGS 实现了比梯度下降（gradient descent）更快的收敛。"
+
+from scipy.optimize import minimize
+
+def negative_log_likelihood(params, Y):
+    """Negative log-likelihood (for minimization)."""
+    N, M = Y.shape
+    theta = params[:N]
+    beta = params[N:]
+
+    logits = theta[:, None] - beta[None, :]
+    nll = -(Y * logits - np.log(1 + np.exp(np.clip(logits, -500, 500)))).sum()
+    return nll
+
+def gradient(params, Y):
+    """Gradient of negative log-likelihood."""
+    N, M = Y.shape
+    theta = params[:N]
+    beta = params[N:]
+
+    P = sigmoid(theta[:, None] - beta[None, :])
+    grad_theta = -(Y - P).sum(axis=1)
+    grad_beta = -(P - Y).sum(axis=0)
+
+    return np.concatenate([grad_theta, grad_beta])
+
+# Initial parameters
+params0 = np.zeros(N + M)
+
+# L-BFGS optimization
+result = minimize(
+    negative_log_likelihood,
+    params0,
+    args=(Y,),
+    jac=gradient,
+    method='L-BFGS-B',
+    options={'maxiter': 200, 'disp': False}
+)
+
+theta_lbfgs = result.x[:N]
+beta_lbfgs = result.x[N:]
+
+# Center for comparison
+theta_lbfgs = theta_lbfgs - theta_lbfgs.mean()
+beta_lbfgs = beta_lbfgs - beta_lbfgs.mean()
+
+print(f"L-BFGS converged: {result.success}")
+print(f"Final log-likelihood: {-result.fun:.2f}")
+print(f"Iterations: {result.nit}")
+
+# Compare to gradient descent
+print(f"\nCorrelation with GD estimates:")
+print(f"  Abilities: {np.corrcoef(theta_hat, theta_lbfgs)[0,1]:.6f}")
+print(f"  Difficulties: {np.corrcoef(beta_hat, beta_lbfgs)[0,1]:.6f}")
+```
+
+
+## 联合、条件与边际MLE {#sec-mle-variants}
+
+我们迄今为止讨论的MLE方法称为*联合最大似然估计*（JMLE）。它将人员参数 $\theta$ 和项目参数 $\beta$ 均视为待估计的固定未知量。然而，JMLE存在理论上的局限性，这促使了其他方法的发展。
+
+### 联合MLE（JMLE） {#sec-jmle}
+
+JMLE通过最大化 @eq-log-likelihood 来同时估计所有参数。尽管直观，但JMLE存在*伴随参数问题*：当项目数量 $M$ 固定而人员数量 $N$ 增长时，项目参数估计值 $\hat{\beta}$ 是不一致的——它们不会收敛到真实值。
+
+这是因为每个人员参数 $\theta_i$ 仅从 $M$ 个观测值（他们对 $M$ 个项目的回答）中估计得到，而这些“伴随”的人员参数会给项目估计引入偏差。
+
+对于项目众多（通常 $M > 100$）的AI基准测试，该偏差在实践中很小。但对于更小的测试，JMLE可能会存在问题。
+
+### 条件MLE（CMLE） {#sec-cmle}
+
+Georg Rasch 发现了一个解决伴随参数问题的优雅方案。具体来说，对于Rasch模型，总分 $S_i = \sum_j Y_{ij}$ 是 $\theta_i$ 的一个*充分统计量*。这意味着数据 $Y_i$ 中关于 $\theta_i$ 的所有信息均被 $S_i$ 所捕获。
+
+通过以充分统计量为条件，我们可以完全消除人员参数：
+
+$$
+P(Y_i \mid S_i, \beta) = \frac{\exp(-\sum_j Y_{ij}\beta_j)}{\gamma_{S_i}(\beta)}
+$$ {#eq-cmle}
+
+其中 $\gamma_r(\beta) = \sum_{A: |A|=r} \exp(-\sum_{j \in A} \beta_j)$ 是 $r$ 阶初等对称函数，它对所有大小为 $r$ 的项目子集 $A$ 求和。
+
+条件似然仅依赖于 $\beta$，因此我们可以在没有任何人员参数的情况下估计项目参数。无论 $N$ 如何增长，这都能得到 $\beta$ 的一致估计。
+
+::: {.callout-note title="Rasch的洞见"}
+总分的充分性是Rasch模型独有的。对于2PL或3PL模型，总分并非充分统计量，因此无法应用CMLE。这一数学性质是Rasch模型在测量理论中享有特殊地位的原因之一。
+:::
+
+### 边际MLE（MMLE） {#sec-mmle}
+
+另一种方法是将人员参数视为来自总体分布的随机变量：
+
+$$
+\theta_i \sim \mathcal{N}(\mu_\theta, \sigma^2_\theta)
+$$
+
+边际似然将人员参数积分消去：
+
+$$
+L(\beta) = \prod_{i=1}^N \int P(Y_i \mid \theta, \beta) \, p(\theta) \, d\theta
+$$ {#eq-mmle}
+
+该方法：
+
+- 将项目参数视为固定、人员参数视为随机
+- 当 $N \to \infty$ 时产生 $\beta$ 的一致估计
+- 自然地扩展到更复杂的IRT模型（2PL、3PL）
+- 构成EM算法的基础（下一节）
+
+::: {.callout-note title="MLE方法比较"}
+| 方法 | 被试参数 | 项目参数 | 一致性 | 适用性 |
+|--------|------------------|-----------------|-------------|---------------|
+| JMLE | 直接估计 | 直接估计 | 对于固定的 $M$ 不一致 | 任何 IRT 模型 |
+| CMLE | 条件消去 | 一致 | 一致 | 仅拉什模型 |
+| MMLE | 积分消去 | 一致 | 一致 | 任何 IRT 模型 |
+
+对于 AI 基准测试中问题较多的情况 ($M > 100$)，JMLE 在实践中表现良好。对于规模较小的测试，或者当统计性质较为重要时，应优先使用 CMLE 或 MMLE。
+:::
+
+
+## EM 算法 {#sec-em}
+
+期望最大化 (Expectation-Maximization, EM) 算法是一种针对含潜变量的极大似然估计的通用方法。在项目反应理论 (IRT) 中，潜变量就是被试能力 $\theta$。
+
+### EM 框架 {#sec-em-framework}
+
+EM 算法在两个步骤之间迭代：
+
+**E 步 (期望):** 基于观测数据和当前的参数估计值，计算完全数据对数似然的期望：
+
+$$
+Q(\beta \mid \beta^{(t)}) = \mathbb{E}_{\theta \mid Y, \beta^{(t)}} \left[ \log P(Y, \theta \mid \beta) \right]
+$$
+
+**M 步 (最大化):** 寻找能使期望对数似然取得最大值的参数值：
+
+$$
+\beta^{(t+1)} = \arg\max_\beta Q(\beta \mid \beta^{(t)})
+$$
+
+EM 算法能保证边际似然在每一次迭代后都会上升（或保持不变），最终收敛到一个局部极大值。
+
+### 拉什模型的 EM 算法 {#sec-em-rasch}
+
+对于能力先验为标准正态分布的拉什模型，EM 算法具有特定的形式：
+
+**E 步:** 针对每一位被试 $i$，基于其作答 $Y_i$ 和当前的项目参数 $\beta^{(t)}$，计算 $\theta_i$ 的后验分布：
+
+$$
+p(\theta_i \mid Y_i, \beta^{(t)}) \propto p(Y_i \mid \theta_i, \beta^{(t)}) \cdot p(\theta_i)
+$$
+
+该后验没有闭式解，因此我们使用数值积分（高斯-埃尔米特求积）。
+
+**M 步:** 通过求解下式来更新每一个项目参数：
+
+$$
+\sum_{i=1}^N \mathbb{E}_{\theta_i}[\sigma(\theta_i - \beta_j)] = \sum_{i=1}^N Y_{ij}
+$$
+
+等式左边是项目 $j$ 正确作答的期望数量，右边是实际观测到的数量，我们令两者相等。
+
+```{pyodide-python}
+#| label: em-algorithm
+#| autorun: true
+#| fig-cap: "EM算法在Rasch模型估计中的收敛性。"
+
+from numpy.polynomial.hermite import hermgauss
+
+def em_rasch(Y, n_iterations=50, n_quadrature=21, verbose=True):
+    """
+    EM algorithm for Rasch model using Gauss-Hermite quadrature.
+
+    Parameters
+    ----------
+    Y : ndarray (N, M)
+        Binary response matrix
+    n_iterations : int
+        Number of EM iterations
+    n_quadrature : int
+        Number of quadrature points
+    verbose : bool
+        Print progress
+
+    Returns
+    -------
+    theta_hat : ndarray (N,)
+        Estimated abilities (posterior means)
+    beta_hat : ndarray (M,)
+        Estimated difficulties
+    ll_history : list
+        Marginal log-likelihood at each iteration
+    """
+    N, M = Y.shape
+
+    # Initialize item difficulties
+    beta = np.zeros(M)
+
+    # Gauss-Hermite quadrature points and weights
+    # These approximate the integral over theta ~ N(0, 1)
+    nodes, weights = hermgauss(n_quadrature)
+    nodes = nodes * np.sqrt(2)  # Scale for standard normal
+    weights = weights / np.sqrt(np.pi)  # Normalize
+
+    ll_history = []
+
+    for iteration in range(n_iterations):
+        # E-step: Compute posterior distributions over theta
+        # P(theta | Y_i, beta) for each person at each quadrature point
+
+        # Compute log-likelihood at each quadrature point for each person
+        # log P(Y_i | theta_q, beta) for all i, q
+        log_L = np.zeros((N, n_quadrature))
+        for q, theta_q in enumerate(nodes):
+            logits = theta_q - beta  # (M,)
+            # log P(Y_i | theta_q) = sum_j [Y_ij * logit_j - log(1 + exp(logit_j))]
+            log_probs = Y * logits - np.log(1 + np.exp(np.clip(logits, -500, 500)))
+            log_L[:, q] = log_probs.sum(axis=1)
+
+        # Compute posterior weights: P(theta_q | Y_i, beta) ∝ P(Y_i | theta_q) * P(theta_q)
+        # The weights already incorporate P(theta_q) from Gauss-Hermite
+        log_posterior = log_L + np.log(weights + 1e-300)
+
+        # Normalize to get posterior probabilities
+        log_posterior_max = log_posterior.max(axis=1, keepdims=True)
+        posterior = np.exp(log_posterior - log_posterior_max)
+        posterior = posterior / posterior.sum(axis=1, keepdims=True)
+
+        # Expected ability for each person (posterior mean)
+        E_theta = (posterior * nodes).sum(axis=1)
+
+        # M-step: Update beta
+        # For each item j, solve: sum_i E[P(Y_ij=1 | theta_i)] = sum_i Y_ij
+        for j in range(M):
+            # Expected probability at each quadrature point
+            for _ in range(5):  # Newton-Raphson iterations
+                E_prob_j = np.zeros(N)
+                E_deriv_j = np.zeros(N)
+                for q, theta_q in enumerate(nodes):
+                    p_q = sigmoid(theta_q - beta[j])
+                    E_prob_j += posterior[:, q] * p_q
+                    E_deriv_j += posterior[:, q] * p_q * (1 - p_q)
+
+                # Newton-Raphson update
+                residual = E_prob_j.sum() - Y[:, j].sum()
+                hessian = -E_deriv_j.sum()
+                if abs(hessian) > 1e-10:
+                    beta[j] = beta[j] - residual / hessian
+
+        # Center beta for identification
+        beta = beta - beta.mean()
+
+        # Compute marginal log-likelihood for monitoring
+        ll = (log_posterior_max.flatten() +
+              np.log(np.exp(log_L - log_posterior_max) @ weights + 1e-300)).sum()
+        ll_history.append(ll)
+
+        if verbose and (iteration + 1) % 10 == 0:
+            print(f"Iteration {iteration + 1}: LL = {ll:.2f}")
+
+    # Final E-step to get ability estimates
+    log_L = np.zeros((N, n_quadrature))
+    for q, theta_q in enumerate(nodes):
+        logits = theta_q - beta
+        log_probs = Y * logits - np.log(1 + np.exp(np.clip(logits, -500, 500)))
+        log_L[:, q] = log_probs.sum(axis=1)
+
+    log_posterior = log_L + np.log(weights + 1e-300)
+    log_posterior_max = log_posterior.max(axis=1, keepdims=True)
+    posterior = np.exp(log_posterior - log_posterior_max)
+    posterior = posterior / posterior.sum(axis=1, keepdims=True)
+    theta_hat = (posterior * nodes).sum(axis=1)
+
+    return theta_hat, beta, ll_history
+
+# Run EM algorithm
+theta_em, beta_em, ll_em = em_rasch(Y, n_iterations=50)
+
+# Plot results
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+# Convergence
+axes[0].plot(ll_em)
+axes[0].set_xlabel('Iteration')
+axes[0].set_ylabel('Marginal Log-likelihood')
+axes[0].set_title('EM Algorithm Convergence')
+axes[0].grid(True, alpha=0.3)
+
+# Ability recovery
+axes[1].scatter(theta_true_centered, theta_em, alpha=0.6)
+axes[1].plot([-3, 3], [-3, 3], 'k--', alpha=0.5)
+axes[1].set_xlabel('True ability (centered)')
+axes[1].set_ylabel('EM estimate')
+axes[1].set_title('Ability Recovery (EM)')
+axes[1].grid(True, alpha=0.3)
+
+# Difficulty recovery
+axes[2].scatter(beta_true_centered, beta_em, alpha=0.6, color='orange')
+axes[2].plot([-4, 4], [-4, 4], 'k--', alpha=0.5)
+axes[2].set_xlabel('True difficulty (centered)')
+axes[2].set_ylabel('EM estimate')
+axes[2].set_title('Difficulty Recovery (EM)')
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+print(f"Correlation (abilities): {np.corrcoef(theta_true_centered, theta_em)[0,1]:.4f}")
+print(f"Correlation (difficulties): {np.corrcoef(beta_true_centered, beta_em)[0,1]:.4f}")
+```
+
+
+### 多维扩展：逻辑斯谛因子模型 {#sec-logistic-fm}
+
+上述方法专注于假设单一潜在维度的Rasch模型。对于衡量多种能力的AI基准，我们将其扩展为**逻辑斯谛因子模型**：
+
+$$
+P(Y_{ij} = 1 \mid U_i, V_j, Z_j) = \sigma(U_i^\top V_j + Z_j)
+$$
+
+其中：
+
+- $U_i \in \mathbb{R}^K$ 是模型 $i$ 的 $K$ 维潜在能力向量
+- $V_j \in \mathbb{R}^K$ 是题目 $j$ 的因子载荷向量
+- $Z_j \in \mathbb{R}$ 是题目截距（反映整体难度）
+
+当 $K=1$ 且对所有 $j$ 有 $V_j = 1$ 时，该模型即退化为Rasch模型。
+
+#### 实现
+
+```{python}
+#| eval: false
+
+import torch
+import torch.nn as nn
+from torch.optim import LBFGS
+import torch.nn.functional as F
+
+class LogisticFM(nn.Module):
+    """Logistic Factor Model for binary response data."""
+    def __init__(self, N, M, K):
+        super().__init__()
+        self.U = nn.Parameter(torch.randn(N, K))  # Model abilities
+        self.V = nn.Parameter(torch.randn(M, K))  # Item loadings
+        self.Z = nn.Parameter(torch.randn(M, 1))  # Item intercepts
+
+    def forward(self):
+        return torch.sigmoid(self.U @ self.V.T + self.Z.T)
+```
+
+::: {.callout-note title="解读"}
+- $U_i$：模型 $i$ 的潜在能力向量（在 $K$ 维能力空间中的位置）
+- $V_j$：题目 $j$ 的潜在属性向量（题目所测量的能力维度）
+- $Z_j$：题目的整体难度（与能力维度无关）
+- $\sigma$：确保概率值在 $[0,1]$ 区间的 sigmoid 函数
+:::
+
+#### 使用 LBFGS 进行训练
+
+我们通过最小化二元交叉熵损失来训练模型：
+
+```{python}
+#| eval: false
+
+# Training setup
+N, M = Y.shape
+K = 2  # Number of latent dimensions
+model = LogisticFM(N, M, K)
+
+opt = LBFGS(
+    model.parameters(),
+    lr=0.1,
+    max_iter=20,
+    history_size=10,
+    line_search_fn="strong_wolfe"
+)
+
+def closure():
+    opt.zero_grad()
+    probs = model()
+    loss = F.binary_cross_entropy(probs[train_mask], Y[train_mask].float())
+    loss.backward()
+    return loss
+
+# Training loop
+for iteration in range(20):
+    loss = opt.step(closure)
+```
+
+模型学习将响应矩阵分解为潜在因子，这些因子捕捉了模型能力与项目特征的底层结构。
+
+
+## 贝叶斯推断 {#sec-bayesian}
+
+贝叶斯推断为最大似然提供了一种替代方法，它自然地结合了先验信息并量化了不确定性。与寻找单一的点估计不同，我们刻画参数的整体后验分布。
+
+### 先验设定 {#sec-priors}
+
+贝叶斯推断的第一步是指定先验分布，编码我们在见到数据之前的先验信念：
+
+::: {.callout-note title="Standard Priors for IRT"}
+**对于能力（人员/模型）：**
+$$\theta_i \sim \mathcal{N}(0, \sigma^2_\theta), \quad \sigma_\theta = 1 \text{ (standard choice)}$$
+
+**对于难度（项目/问题）：**
+$$\beta_j \sim \mathcal{N}(0, \sigma^2_\beta), \quad \sigma_\beta = 1\text{-}2 \text{ (depending on expected range)}$$
+
+**对于区分度（2PL 模型）：**
+$$a_j \sim \text{LogNormal}(0, 0.5) \text{ or } a_j \sim \text{Gamma}(2, 0.5)$$
+
+这些先验是**弱信息性的**：它们在不主导数据的情况下对估计进行正则化。它们编码了这样的信念：大多数能力和难度在零附近几个单位之内，当尺度由约定定义时这是合理的。
+:::
+
+### 后验计算 {#sec-posterior}
+
+贝叶斯定理给出了后验分布：
+
+$$
+p(\theta, \beta \mid Y) \propto p(Y \mid \theta, \beta) \cdot p(\theta) \cdot p(\beta)
+$$ {#eq-posterior}
+
+后验将似然（数据）与先验（信念）相结合。不幸的是，此后验没有封闭形式——我们需要计算方法。
+
+### MAP 估计 {#sec-map}
+
+最简单的贝叶斯方法是*最大后验估计*（MAP），它寻找后验的众数：
+
+$$
+\hat{\theta}_{\text{MAP}}, \hat{\beta}_{\text{MAP}} = \arg\max_{\theta, \beta} \left[ \ell(\theta, \beta \mid Y) + \log p(\theta) + \log p(\beta) \right]
+$$ {#eq-map}
+
+在具有高斯先验的情况下，这等价于 L2 正则化的最大似然估计：
+
+$$
+\hat{\theta}_{\text{MAP}}, \hat{\beta}_{\text{MAP}} = \arg\max_{\theta, \beta} \left[ \ell(\theta, \beta) - \frac{1}{2\sigma^2_\theta}\sum_i \theta_i^2 - \frac{1}{2\sigma^2_\beta}\sum_j \beta_j^2 \right]
+$$
+
+```{pyodide-python}
+#| label: map-estimation
+#| autorun: true
+#| fig-cap: "比较MLE与MAP估计以展示贝叶斯收缩"
+
+def map_objective(params, Y, sigma_theta=1.0, sigma_beta=1.5):
+    """Negative log-posterior (to minimize)."""
+    N, M = Y.shape
+    theta = params[:N]
+    beta = params[N:]
+
+    # Log-likelihood
+    logits = theta[:, None] - beta[None, :]
+    ll = (Y * logits - np.log(1 + np.exp(np.clip(logits, -500, 500)))).sum()
+
+    # Log-prior (Gaussian)
+    log_prior_theta = -0.5 * (theta**2 / sigma_theta**2).sum()
+    log_prior_beta = -0.5 * (beta**2 / sigma_beta**2).sum()
+
+    return -(ll + log_prior_theta + log_prior_beta)
+
+def map_gradient(params, Y, sigma_theta=1.0, sigma_beta=1.5):
+    """Gradient of negative log-posterior."""
+    N, M = Y.shape
+    theta = params[:N]
+    beta = params[N:]
+
+    P = sigmoid(theta[:, None] - beta[None, :])
+    grad_theta = -(Y - P).sum(axis=1) + theta / sigma_theta**2
+    grad_beta = -(P - Y).sum(axis=0) + beta / sigma_beta**2
+
+    return np.concatenate([grad_theta, grad_beta])
+
+# MAP estimation
+params0 = np.zeros(N + M)
+result_map = minimize(
+    map_objective, params0, args=(Y,),
+    jac=map_gradient,
+    method='L-BFGS-B',
+    options={'maxiter': 200}
+)
+
+theta_map = result_map.x[:N]
+beta_map = result_map.x[N:]
+
+# Center for comparison
+theta_map = theta_map - theta_map.mean()
+beta_map = beta_map - beta_map.mean()
+
+# Compare MLE vs MAP
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+# Abilities
+axes[0].scatter(theta_true_centered, theta_lbfgs, alpha=0.5, label='MLE', s=30)
+axes[0].scatter(theta_true_centered, theta_map, alpha=0.5, label='MAP', s=30)
+axes[0].plot([-3, 3], [-3, 3], 'k--', alpha=0.5)
+axes[0].set_xlabel('True ability')
+axes[0].set_ylabel('Estimated ability')
+axes[0].set_title('Ability Estimates: MLE vs MAP')
+axes[0].legend()
+axes[0].grid(True, alpha=0.3)
+
+# Difficulties
+axes[1].scatter(beta_true_centered, beta_lbfgs, alpha=0.5, label='MLE', s=30)
+axes[1].scatter(beta_true_centered, beta_map, alpha=0.5, label='MAP', s=30)
+axes[1].plot([-4, 4], [-4, 4], 'k--', alpha=0.5)
+axes[1].set_xlabel('True difficulty')
+axes[1].set_ylabel('Estimated difficulty')
+axes[1].set_title('Difficulty Estimates: MLE vs MAP')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Shrinkage demonstration
+print("Shrinkage effect (standard deviations):")
+print(f"  MLE abilities: {theta_lbfgs.std():.3f}, MAP abilities: {theta_map.std():.3f}")
+print(f"  MLE difficulties: {beta_lbfgs.std():.3f}, MAP difficulties: {beta_map.std():.3f}")
+```
+
+::: {.callout-tip title="Bayesian Shrinkage"}
+请注意，MAP 估计的方差小于 MLE 估计。这就是向先验均值（零）的**收缩**。
+
+对于极端得分——即答对所有问题或答错所有问题的模型——MLE 会给出无穷大或非常大的估计值。MAP 将这些值正则化为有限且合理的数值。这对于 AI 基准测试至关重要，因为有些模型可能在简单子集上获得接近完美的分数。
+
+收缩量由先验方差控制：较小的 $\sigma^2$ 意味着向零的收缩更强。
+:::
+
+### MCMC Sampling {#sec-mcmc}
+
+为了刻画完整的后验分布（而不仅仅是其众数），我们使用马尔可夫链蒙特卡罗（MCMC）采样。Metropolis-Hastings 算法是一种简单而有效的方法：
+
+```{pyodide-python}
+#| label: mcmc-sampling
+#| autorun: true
+#| fig-cap: "MCMC轨迹图及所选参数的后验分布。"
+
+def log_posterior(theta, beta, Y, sigma_theta=1.0, sigma_beta=1.5):
+    """Compute log-posterior (up to normalizing constant)."""
+    logits = theta[:, None] - beta[None, :]
+    ll = (Y * logits - np.log(1 + np.exp(np.clip(logits, -500, 500)))).sum()
+    log_prior = -0.5 * ((theta**2).sum() / sigma_theta**2 +
+                        (beta**2).sum() / sigma_beta**2)
+    return ll + log_prior
+
+def metropolis_hastings_rasch(Y, n_samples=2000, n_warmup=500,
+                              proposal_sd=0.05, thin=2, verbose=True):
+    """
+    Metropolis-Hastings sampler for Rasch model.
+
+    Uses a random-walk proposal for all parameters jointly.
+    """
+    N, M = Y.shape
+
+    # Initialize at MAP estimate
+    theta = theta_map.copy()
+    beta = beta_map.copy()
+
+    # Storage for samples
+    n_stored = n_samples // thin
+    theta_samples = np.zeros((n_stored, N))
+    beta_samples = np.zeros((n_stored, M))
+
+    current_lp = log_posterior(theta, beta, Y)
+    n_accept = 0
+    sample_idx = 0
+
+    total_iterations = n_warmup + n_samples
+
+    for s in range(total_iterations):
+        # Propose new theta (random walk)
+        theta_prop = theta + np.random.normal(0, proposal_sd, N)
+        theta_prop = theta_prop - theta_prop.mean()  # Maintain centering
+
+        # Propose new beta (random walk)
+        beta_prop = beta + np.random.normal(0, proposal_sd, M)
+        beta_prop = beta_prop - beta_prop.mean()  # Maintain centering
+
+        # Compute acceptance probability
+        prop_lp = log_posterior(theta_prop, beta_prop, Y)
+        log_alpha = prop_lp - current_lp
+
+        # Accept or reject
+        if np.log(np.random.random()) < log_alpha:
+            theta = theta_prop
+            beta = beta_prop
+            current_lp = prop_lp
+            if s >= n_warmup:
+                n_accept += 1
+
+        # Store sample (after warmup, with thinning)
+        if s >= n_warmup and (s - n_warmup) % thin == 0:
+            theta_samples[sample_idx] = theta
+            beta_samples[sample_idx] = beta
+            sample_idx += 1
+
+    acceptance_rate = n_accept / n_samples
+    if verbose:
+        print(f"Acceptance rate: {acceptance_rate:.3f}")
+
+    return theta_samples, beta_samples, acceptance_rate
+
+# Run MCMC
+np.random.seed(123)
+theta_samples, beta_samples, acc_rate = metropolis_hastings_rasch(
+    Y, n_samples=4000, n_warmup=1000, proposal_sd=0.03, thin=2
+)
+
+# Visualization
+fig, axes = plt.subplots(2, 3, figsize=(6, 2))
+
+# Trace plots for selected ability parameters
+for i, idx in enumerate([0, 49, 99]):
+    axes[0, i].plot(theta_samples[:, idx], alpha=0.7, linewidth=0.5)
+    axes[0, i].axhline(theta_true_centered[idx], color='r', linestyle='--',
+                       linewidth=1.5, label='True')
+    axes[0, i].axhline(theta_samples[:, idx].mean(), color='g', linestyle='-',
+                       linewidth=1.5, label='Post. mean')
+    axes[0, i].set_xlabel('Sample')
+    axes[0, i].set_ylabel(f'$\\theta_{{{idx}}}$')
+    axes[0, i].set_title(f'Trace: Ability {idx}')
+    if i == 0:
+        axes[0, i].legend(fontsize=8)
+
+# Posterior distributions for selected difficulty parameters
+for i, idx in enumerate([0, 24, 49]):
+    axes[1, i].hist(beta_samples[:, idx], bins=30, density=True, alpha=0.7)
+    axes[1, i].axvline(beta_true_centered[idx], color='r', linestyle='--',
+                       linewidth=2, label='True')
+    axes[1, i].axvline(beta_samples[:, idx].mean(), color='g', linestyle='-',
+                       linewidth=2, label='Post. mean')
+    axes[1, i].set_xlabel(f'$\\beta_{{{idx}}}$')
+    axes[1, i].set_ylabel('Density')
+    axes[1, i].set_title(f'Posterior: Difficulty {idx}')
+    if i == 0:
+        axes[1, i].legend(fontsize=8)
+
+plt.tight_layout()
+plt.show()
+
+# Posterior summary statistics
+theta_post_mean = theta_samples.mean(axis=0)
+theta_post_std = theta_samples.std(axis=0)
+beta_post_mean = beta_samples.mean(axis=0)
+beta_post_std = beta_samples.std(axis=0)
+
+print(f"\nPosterior summary:")
+print(f"  Mean posterior std for abilities: {theta_post_std.mean():.3f}")
+print(f"  Mean posterior std for difficulties: {beta_post_std.mean():.3f}")
+print(f"  Correlation with true abilities: {np.corrcoef(theta_true_centered, theta_post_mean)[0,1]:.4f}")
+print(f"  Correlation with true difficulties: {np.corrcoef(beta_true_centered, beta_post_mean)[0,1]:.4f}")
+```
+
+后验标准差量化了我们对每个参数的不确定性。拥有更多信息的参数（例如，被许多模型回答的项目，或回答了许多问题的模型）的后验不确定性较小。
+
+
+## 正则化与模型选择 {#sec-regularization}
+
+### L2 正则化作为贝叶斯先验 {#sec-l2-reg}
+
+我们已经看到，使用高斯先验的 MAP 估计等价于 L2 正则化。正则化强度 $\lambda$ 与先验方差的关系为 $\lambda = 1/\sigma^2$。
+
+正则化后的目标是：
+
+$$
+\ell_{\text{reg}}(\theta, \beta) = \ell(\theta, \beta) - \frac{\lambda_\theta}{2}\|\theta\|^2 - \frac{\lambda_\beta}{2}\|\beta\|^2
+$$
+
+正则化可防止过拟合，尤其是在以下情况：
+
+- 某些个体的回答很少（数据稀疏）
+- 某些项目具有极端难度（接近 0% 或 100% 的通过率）
+- 模型复杂（参数相对数据来说很多）
+
+### 用于超参数选择的交叉验证 {#sec-cv}
+
+如何选择正则化强度？交叉验证给出了原则性的答案：我们留出一部分数据，用剩余数据训练，然后评估预测性能。
+
+```{pyodide-python}
+#| label: cross-validation
+#| autorun: true
+#| fig-cap: "用于选择正则化强度的交叉验证。"
+
+def fit_and_evaluate(Y_train_mask, Y, lambda_param, sigma_theta=None, sigma_beta=None):
+    """Fit model on training data, evaluate on held-out data."""
+    N, M = Y.shape
+
+    # Convert lambda to prior std
+    if sigma_theta is None:
+        sigma_theta = 1 / np.sqrt(lambda_param + 1e-10)
+    if sigma_beta is None:
+        sigma_beta = 1 / np.sqrt(lambda_param + 1e-10)
+
+    # Fit on training data
+    def objective(params):
+        theta = params[:N]
+        beta = params[N:]
+        logits = theta[:, None] - beta[None, :]
+
+        # Only include training observations in likelihood
+        ll = (Y_train_mask * (Y * logits - np.log(1 + np.exp(np.clip(logits, -500, 500))))).sum()
+        log_prior = -0.5 * ((theta**2).sum() / sigma_theta**2 +
+                           (beta**2).sum() / sigma_beta**2)
+        return -(ll + log_prior)
+
+    params0 = np.zeros(N + M)
+    result = minimize(objective, params0, method='L-BFGS-B', options={'maxiter': 100})
+
+    theta_fit = result.x[:N]
+    beta_fit = result.x[N:]
+
+    # Evaluate on held-out data
+    P = sigmoid(theta_fit[:, None] - beta_fit[None, :])
+    test_mask = 1 - Y_train_mask
+
+    # Log-likelihood on test set
+    ll_test = (test_mask * (Y * np.log(P + 1e-10) +
+               (1 - Y) * np.log(1 - P + 1e-10))).sum()
+    n_test = test_mask.sum()
+
+    return ll_test / n_test  # Average log-likelihood
+
+def cross_validate(Y, lambda_param, n_folds=5, seed=42):
+    """K-fold cross-validation for regularization strength."""
+    np.random.seed(seed)
+    N, M = Y.shape
+
+    # Create random fold assignments for entries
+    fold_assignment = np.random.randint(0, n_folds, (N, M))
+
+    cv_scores = []
+    for fold in range(n_folds):
+        train_mask = (fold_assignment != fold).astype(float)
+        score = fit_and_evaluate(train_mask, Y, lambda_param)
+        cv_scores.append(score)
+
+    return np.mean(cv_scores), np.std(cv_scores)
+
+# Grid search over regularization strengths
+lambdas = [0.001, 0.01, 0.1, 0.5, 1.0, 2.0, 5.0]
+cv_means = []
+cv_stds = []
+
+print("Cross-validation results:")
+for lam in lambdas:
+    mean, std = cross_validate(Y, lam)
+    cv_means.append(mean)
+    cv_stds.append(std)
+    print(f"  lambda = {lam:5.3f}: CV log-lik = {mean:.4f} +/- {std:.4f}")
+
+# Plot
+plt.figure()
+plt.errorbar(lambdas, cv_means, yerr=cv_stds, fmt='o-', capsize=5, markersize=8)
+plt.xscale('log')
+plt.xlabel('Regularization strength ($\\lambda$)')
+plt.ylabel('Cross-validation log-likelihood')
+plt.title('Hyperparameter Selection via Cross-Validation')
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+best_lambda = lambdas[np.argmax(cv_means)]
+print(f"\nBest regularization: lambda = {best_lambda}")
+```
+
+
+## 泛化实验 {#sec-generalization}
+
+本章开发的估计方法生成了具有潜在参数$(U, V, Z)$的习得因子模型。但这些模型的泛化能力如何？为了评估习得因子模型的鲁棒性和可迁移性，我们在不同的**掩码方案**下对其进行训练和测试，每种方案代表了一种不同的泛化概念。这些掩码决定了响应矩阵$Y$的哪些部分在训练期间可见，哪些部分留作评估。
+
+### 用于评估的掩码方案 {#sec-masking-schemes}
+
+| **掩码类型** | **训练集** | **测试集** | **目的** |
+|------------------|---------------|--------------|-------------|
+| 条目级随机 | 80%随机条目 | 20%随机条目 | 随机缺失下的插补 |
+| 行留出（随机） | 80%的模型，所有条目 | 20%的模型，所有条目 | 泛化到未见模型 |
+| 行留出（偏移） | 模型的一个切片（小→大） | 不相交的切片 | 协变量偏移泛化 |
+| 列留出（随机） | 所有模型，80%的条目 | 所有模型，20%的条目 | 泛化到未见条目 |
+| 列留出（偏移） | 基准的子集 | 留出的基准 | 跨域迁移 |
+| 行列块（L掩码） | $R_{tr} \times C_{tr}$ | $R_{te} \times C_{te}$ | 组合泛化 |
+| 时间划分 | 截止日期前的模型 | 截止日期后的模型 | 时间泛化 |
+
+这些设置与心理测量验证测试相仿，在这些测试中，新的受试者、条目或情境探测潜在构造的不变性。
+
+### 掩码函数的实现
+
+```{python}
+#| eval: false
+
+import torch
+
+def random_mask(data_idtor, pct=0.8):
+    """Entry-wise random masking."""
+    train_idtor = torch.bernoulli(data_idtor * pct).int()
+    test_idtor = data_idtor.int() - train_idtor
+    return train_idtor, test_idtor
+
+def model_mask(data_idtor, pct_models=0.8, exposure_rate=0.3):
+    """Row holdout: hold out unseen models."""
+    train_row_mask = torch.bernoulli(torch.ones(data_idtor.shape[0]) * pct_models).bool()
+    train_idtor = torch.zeros_like(data_idtor).int()
+    train_idtor[train_row_mask, :] = data_idtor[train_row_mask, :]
+    train_idtor[~train_row_mask, :], _ = random_mask(data_idtor[~train_row_mask, :], pct=exposure_rate)
+    test_idtor = data_idtor - train_idtor
+    return train_idtor, test_idtor
+
+def item_mask(data_idtor, pct_items=0.8, exposure_rate=0.3):
+    """Column holdout: hold out unseen items."""
+    train_col_mask = torch.bernoulli(torch.ones(data_idtor.shape[1]) * pct_items).bool()
+    train_idtor = torch.zeros_like(data_idtor).int()
+    train_idtor[:, train_col_mask] = data_idtor[:, train_col_mask]
+    train_idtor[:, ~train_col_mask], _ = random_mask(data_idtor[:, ~train_col_mask], pct=exposure_rate)
+    test_idtor = data_idtor - train_idtor
+    return train_idtor, test_idtor
+
+def L_mask(data_idtor, pct_models=0.8, pct_items=0.8):
+    """Row-column block (L-mask): compositional generalization."""
+    train_row_mask = torch.bernoulli(torch.ones(data_idtor.shape[0]) * pct_models).bool()
+    train_col_mask = torch.bernoulli(torch.ones(data_idtor.shape[1]) * pct_items).bool()
+    train_idtor = torch.zeros_like(data_idtor).int()
+    train_idtor[train_row_mask][:, train_col_mask] = data_idtor[train_row_mask][:, train_col_mask]
+    test_idtor = data_idtor - train_idtor
+    test_idtor[train_row_mask, :] = 0
+    test_idtor[:, train_col_mask] = 0
+    return train_idtor, test_idtor
+```
+
+### 两阶段训练用于留出泛化 {#sec-two-stage}
+
+为避免在行留出和列留出实验中出现数据污染，我们采用一种 **两阶段训练过程**：
+
+#### 行留出：为未见过模型估计参数
+
+在测试对未见过模型的泛化能力时，我们：
+
+1. **阶段 1：** 在已知模型上训练以学习项目参数 $(V, Z)$
+2. **阶段 2：** 冻结 $(V, Z)$，并利用留出模型有限暴露的响应估计其能力参数 $U$
+
+这确保了项目参数的学习过程中不包含测试模型的信息。
+
+```{python}
+#| eval: false
+
+# Stage 1: Train on known models
+test_row = test_idtor.max(axis=1).values  # Identify held-out models
+model_stage1 = train_model(Y[~test_row, :], mask=train_idtor[~test_row, :])
+
+# Freeze V, Z from Stage 1
+V_frozen = model_stage1.V.detach()
+Z_frozen = model_stage1.Z.detach()
+
+# Stage 2: Estimate U for unseen models with frozen item parameters
+model_stage2 = train_model(Y[test_row, :], mask=train_idtor[test_row, :],
+                           V_fixed=V_frozen, Z_fixed=Z_frozen)
+```
+
+#### 列保留法：估计未见项目的参数
+
+在测试对未见项目的泛化能力时，我们：
+
+1. **阶段1：** 在已知项目上训练，学习模型参数 $U$
+2. **阶段2：** 冻结 $U$，为保留项目估计项目参数 $(V, Z)$
+
+```{python}
+#| eval: false
+
+# Stage 1: Train on known items
+test_col = test_idtor.max(axis=0).values  # Identify held-out items
+model_stage1 = train_model(Y[:, ~test_col], mask=train_idtor[:, ~test_col])
+
+# Freeze U from Stage 1
+U_frozen = model_stage1.U.detach()
+
+# Stage 2: Estimate V, Z for unseen items with frozen model parameters
+model_stage2 = train_model(Y[:, test_col], mask=train_idtor[:, test_col],
+                           U_fixed=U_frozen)
+```
+
+::: {.callout-note title="Why Two-Stage Training?"}
+两阶段流程可防止信息泄露：
+
+- **行保留：** 从训练模型中学习到的项目参数不应包含有关测试模型的信息
+- **列保留：** 从训练项目中学习到的模型参数不应包含有关测试项目的信息
+
+这反映了真实世界中的场景：我们希望在预先校准的项目上评估新模型，或使用已建立的模型校准新项目。
+:::
+
+### 跨掩码方案评估
+
+对于每种掩码方案，我们计算在保留项上的AUC：
+
+```{python}
+#| eval: false
+
+from torchmetrics import AUROC
+
+masking_schemes = {
+    "entry_random": random_mask,
+    "row_holdout": model_mask,
+    "col_holdout": item_mask,
+    "L_mask": L_mask,
+}
+
+results = {}
+auroc = AUROC(task="binary")
+
+for name, mask_fn in masking_schemes.items():
+    train_mask, test_mask = mask_fn(data_idtor)
+
+    # Train model (with two-stage for row/col holdout)
+    model = train_with_appropriate_stages(Y, train_mask, test_mask, name)
+
+    # Evaluate on held-out entries
+    P_hat = model().detach()
+    auc = auroc(P_hat[test_mask.bool()], Y[test_mask.bool()])
+    results[name] = auc.item()
+    print(f"{name}: AUC = {auc:.3f}")
+```
+
+因子模型在随机掩码基准测试中通常能达到92-97%的AUC，展现出强大的预测能力。行和列留出测试分别检验模型泛化到新模型和新条目的能力。
+
+::: {.callout-tip title="应用：项目反应标度律"}
+模型能力与项目难度分离——即IRT的核心特性——对规模律有强大的应用。@truong2025irsl 表明，通过将IRT嵌入到规模律框架中，可以将规模律估计的复杂度从 $O(M \times N)$ 分解为 $O(M + N)$，其中 $M$ 是模型（或检查点）的数量，$N$ 是问题的数量。
+
+他们的关键发现是，IRT的能力参数 $\theta$ 与预训练计算量的对数呈线性关系：$\theta \approx a \cdot \log(\text{FLOP}) + b$。结合校准后的项目参数，这可以得到每个问题的规模预测：$\hat{R}_{ij}(x) = \sigma(d_j(\theta_i(x) - z_j))$。由于项目参数可以在共享相同测量目标的基准之间转移，因此在一个基准上估计的能力可以预测另一个基准上的性能——这直接验证了上述掩码实验中测试的跨基准转移能力。
+
+在一项涉及6,612个模型检查点和37,682个问题的研究中，该方法每个基准仅使用50个问题，就实现了与传统规模律相当或更优的决策精度——查询量减少了99.9%。该方法使用Beta-IRT，对经验概率响应（词元概率、通过率）而非二元正确率进行建模，从而捕捉到更丰富的规模信号。
+:::
+
+### 摊销模型评测 {#sec-amortized-eval}
+
+在第 @sec-cold-start 节中引入的摊销模型（预测驱动评测）同样可以在掩码框架下评测。在PPE流水线中，项目侧预测器 $f_\theta$ 将问题嵌入映射到潜在参数，模型侧预测器 $g_\phi$ 将模型元数据映射到能力向量。我们使用相同的AUC指标，在留出数据上评测这些摊销预测器：
+
+| **划分**          | **AUC** |
+|--------------------|---------|
+| 列留出（随机）    | 0.804   |
+| 行留出（随机）    | 0.848   |
+
+行留出（未见过的模型）上的高AUC证实，模型行为可以通过简单的元数据特征（参数量、架构、发布日期）很好地预测，从而无需对每个基准项目运行模型即可实现可靠评测。列留出的结果表明，问题嵌入携带了足够的信息来预测未见过的项目的行为模式，尽管列留出和行留出之间的差距表明，项目级别的预测是更困难的任务——这与第 @sec-cold-start 节中讨论的语义-行为差距一致。
+
+
+## 讨论题 {#sec-discussion}
+
+1. **可识别性与解释性：** 在AI评估中，我们应当通过固定某一个模型（例如GPT-4 = 0）来锚定能力量表，还是通过对所有模型进行中心化？随着新模型的发布，这对解释能力分数随时间的变化有何影响？
+
+2. **贝叶斯与频率学派：** 在AI基准分析中，何时贝叶斯推断优于最大似然估计？请考虑数据有限、出现极端分数或需要不确定性量化的场景。
+
+3. **从学习到设计：** 本章聚焦于从固定数据集中估计参数。第3章将探讨如何*设计*评估——包括选择哪些题目、如何分配测试资源以及如何确保稳健性。本章所学的估计方法中有哪些方面能够为良好的基准设计提供指导？
+
+4. **题目参数的迁移：** 如果我们基于一组模型（例如2023年的模型）标定题目难度参数，是否可以使用这些参数来评估2024年的模型？这需要哪些假设，这些假设何时可能失效？
+
+5. **多维扩展：** 本章聚焦于一维模型（单一能力）。对于多维因子模型，学习过程将如何变化？会带来哪些额外的挑战？
+
+
+## 文献注释 {#sec-learning-bib}
+
+### 最大似然估计
+
+IRT模型的最大似然估计理论在 @lord1968statistical 和 @birnbaum1968some 中得到了全面阐述。联合最大似然估计方法及其局限性（偶然参数问题）在 @neyman1948consistent 中进行了讨论。关于现代计算方法，请参见 @baker2004item。
+
+### 条件与边际最大似然估计
+
+Rasch模型的条件最大似然估计由@andersen1970asymptotic 提出，他证明了其一致性并推导出计算所需的基本对称函数。边际最大似然估计由@bock1970fitting 引入，并由@bock1981marginal 通过EM算法推广。
+
+### EM算法
+
+通用的EM算法由@dempster1977maximum 正式提出。其在IRT中的应用在@bock1981marginal 中有详细说明。关于现代处理方法，请参见@mclachlan2007algorithm。
+
+### 贝叶斯IRT
+
+贝叶斯方法在IRT中的应用由@swaminathan1982bayesian 开创，并由@albert1992bayesian 使用Gibbs采样加以推进。现代参考文献包括@fox2010bayesian 以及Stan软件文档[@carpenter2017stan]。
+
+### Beta-IRT与连续响应
+
+标准 IRT 模型假设二元（正确/错误）响应，但语言模型提供了更丰富的信号：预训练中的 token 概率以及重复采样中的经验通过率。@truong2025irsl 引入了 Beta-IRT，将伯努利损失替换为由 IRT logistic 均值 $\sigma(d_j(\theta_i - z_j))$ 和精度参数 $\phi$ 参数化的 Beta 损失。这使得仅需 2 名被试（比 Binary-IRT 少 30–60 倍）就能实现可靠校准，从而可实际用于模型检查点数量远超二元 IRT 需求的缩放定律研究。@schaeffer2025monkeys 将每个问题的指数缩放与聚合幂律缩放之间的联系形式化，表明幂律指数由成功概率分布左尾形状控制——用 IRT 术语来说正是题目难度分布。
+
+### 优化方法
+
+L-BFGS 的描述见 @nocedal2006numerical。关于应用于心理测量模型的深度学习优化器，请参阅 @kingma2015adam 中的 Adam。
+
+
+## 练习 {#sec-learning-exercises}
+
+### 理论习题
+
+**练习 2.1**（$\star$）：推导 Rasch 模型对数似然关于 $\theta_i$ 的梯度。证明它等于残差之和：$\frac{\partial \ell}{\partial \theta_i} = \sum_j (Y_{ij} - P_{ij})$。
+
+**练习 2.2**（$\star\star$）：证明 Rasch 对数似然的 Hessian 矩阵是负半定的，从而确保对数似然是凹函数。
+
+**练习 2.3**（$\star\star$）：证明对于 Rasch 模型，题目 $j$ 在能力 $\theta$ 处的 Fisher 信息量为 $I_j(\theta) = P_j(1-P_j)$，并且当 $\theta = \beta_j$ 时该信息量最大。
+
+**练习 2.4**（$\star\star\star$）：推导 2PL 模型的 EM 算法。与 Rasch 模型相比，区分度参数会带来哪些额外的复杂性？
+
+**练习 2.5**（$\star\star$）：证明对参数施加 L2 正则化等价于使用高斯先验的 MAP 估计。正则化强度 $\lambda$ 与先验方差 $\sigma^2$ 之间的关系是什么？
+
+### 计算习题
+
+**练习 2.6**（$\star\star$）：实现 Rasch 模型的条件 MLE。利用条件似然仅依赖于题目参数这一事实，并可使用初等对称函数计算。
+
+**练习 2.7**（$\star\star\star$）：为 Rasch 模型实现一个 Gibbs 采样器，交替执行以下步骤：
+   - 对每个人，从 $\theta_i \mid Y, \beta$ 抽样（使用切片采样）
+   - 对每个题目，从 $\beta_j \mid Y, \theta$ 抽样
+
+将后验估计与 Metropolis-Hastings 的结果进行比较。
+
+**练习 2.8**（$\star\star\star$）：使用数值求积实现边际 MLE，以积分去除能力参数。将收敛性和参数恢复情况与本章的 EM 方法进行比较。
+
+**练习 2.9** ($\star\star$)：实现 Beta-IRT 估计。给定一个经验概率（例如 token 概率或通过率）的响应矩阵 $P_{ij} \in [0, 1]$，最大化 Beta 对数似然 $\sum_{i,j} \log p(P_{ij}; \mu_{ij}, \phi)$，其中 $\mu_{ij} = \sigma(d_j(\theta_i - z_j))$ 是 IRT 预测的均值，$\phi > 0$ 是精度参数。(a) 推导关于 $\theta_i$ 和 $z_j$ 的梯度。(b) 使用 $M = 50$ 个模型和 $N = 200$ 个项目模拟数据，其中 $P_{ij} \sim \text{Beta}(\mu_{ij} \phi, (1 - \mu_{ij})\phi)$，且 $\phi = 10$。(c) 比较 Beta-IRT 与二元 IRT（其中响应以 0.5 为阈值二值化）的参数还原情况，作为 $M$ 的函数。验证 @truong2025irsl 的发现，即 Beta-IRT 能够用比二元 IRT 少得多的模型实现可靠的校准。
+
+### 讨论练习
+
+**练习 2.9：** 比较梯度下降、L-BFGS 和 Adam 在 Rasch 模型估计问题上的收敛情况。哪种方法收敛最快？哪种方法对不同的初始化最鲁棒？
+
+**练习 2.10：** 研究极大似然估计（MLE）和贝叶斯估计对模型设定错误的敏感性。从 2PL 模型生成数据，但拟合 Rasch 模型。估计的能力值有何差异？在什么情况下模型设定错误的影响最大？
+
+**练习 2.11：** 实现一个交叉验证程序，用于在 Rasch、2PL 和因子模型之间进行选择。将其应用于具有不同项目和模型数量的基准数据。2PL 或因子模型的额外复杂性何时能够改善样本外预测？

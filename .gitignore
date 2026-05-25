@@ -17,6 +17,10 @@ _slides/
 /.quarto/
 *_cache/
 
+# Translation pipeline
+.translation-cache/
+*.qmd.bak
+
 # Jupyter cache
 .jupyter_cache/
 src/.jupyter_cache/

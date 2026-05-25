@@ -1,0 +1,610 @@
+﻿---
+format:
+  html:
+    include-after-body:
+      text: |
+        <script>
+        // Auto-execute all pyodide cells after initialization
+        document.addEventListener('DOMContentLoaded', function() {
+          function waitForPyodide() {
+            if (typeof globalThis.mainPyodide !== 'undefined' && globalThis.mainPyodide) {
+              if (typeof globalThis.qpyodideCellDetails !== 'undefined') {
+                globalThis.qpyodideCellDetails.forEach((cell, index) => {
+                  if (cell.options && cell.options.autorun === 'true') {
+                    setTimeout(() => {
+                      const runButton = document.querySelector(`#qpyodide-button-run-${cell.id}`);
+                      if (runButton && !runButton.disabled) {
+                        runButton.click();
+                      }
+                    }, index * 1000);
+                  }
+                });
+              }
+            } else {
+              setTimeout(waitForPyodide, 500);
+            }
+          }
+          setTimeout(waitForPyodide, 2000);
+        });
+        </script>
+filters:
+  - pyodide
+pyodide:
+  packages:
+    - numpy
+    - matplotlib
+    - scipy
+---
+
+# 高效测量 {#sec-efficient}
+
+::: {.callout-note title="预期学习成果"}
+学完本章后，你将能够：
+
+1. **将**基准设计问题表述为关于项目选择和评分规则的优化问题。
+2. **应用**费希尔信息选择最具信息量的项目，并实施计算机化自适应测试程序。
+3. **构建**最大化能力估计精度的D最优项目池。
+4. **设计**利用信息论原理的高效配对比较赛事。
+5. **解释**自适应AI评估的停止规则和实际约束（成本、时间、污染）。
+:::
+
+::: {.callout-tip title="建议的讲授计划" collapse="true"}
+本章可用**2次讲座**（每次75-90分钟）讲授：
+
+**讲座1：费希尔信息与自适应测试**
+
+- 基准设计问题（15 分钟）
+- 用于项目选择的费希尔信息（20 分钟）
+- 计算机化自适应测试（30 分钟）
+- 动手实践：CAT 模拟（10 分钟）
+
+**讲座2：最优设计与配对比较**
+
+- D最优设计与项目池构建（30 分钟）
+- 配对比较的设计（20 分钟）
+- 停止规则与实际考虑（15 分钟）
+- 动手实践：D最优设计模拟（10 分钟）
+:::
+
+::: {.callout-note title="符号约定"}
+本章引入$I_j(\theta)$（项目$j$的费希尔信息）和$\mathcal{I}(\theta)$（费希尔信息矩阵）。有关完整的符号参考，请参阅[符号附录](notation.qmd)。
+:::
+
+
+## AI评估中的设计问题 {#sec-design-problem}
+
+第1章介绍了测量模型——Rasch模型、2PL模型、因子模型、Bradley-Terry模型——它们形式化了潜在能力如何产生观测响应。第2章展示了如何从数据中估计这些模型的参数。但这两章都将响应矩阵$Y$视为给定的。在实际操作中，必须有人*设计*评估：选择包含哪些项目以及如何评分响应。这些设计决策对最终测量的质量和效率有着深远的影响。
+
+基准设计者面临两个基本的效率问题：
+
+1. **项目选择：**基准应该包含哪些问题或任务？给定一个候选项目池，如何选择一个子集以最大化测量的精度？
+
+2. **评分规则：**如何将响应汇总为分数？总和分数、加权分数、潜在因子分数？选择与测量模型相互作用（回顾第1章，总和分数对于Rasch模型是充分的，但对于2PL模型则不然）。
+
+本章借鉴经典实验设计和信息论，为高效评估设计发展了统计基础。我们将这些框架应用于设计AI评估基准的实际问题，以最小的成本实现高测量精度。
+
+
+## 最优实验设计 {#sec-optimal-design}
+
+我们从最简单的设定开始：评估者希望尽可能精确地测量模型能力，而模型诚实地作答。这就是应用于测量的经典*最优实验设计*问题。
+
+### Fisher Information for Item Selection {#sec-fisher-design}
+
+回忆第2章，在Rasch模型中，题目$j$在能力$\theta$处的费希尔信息量为：
+
+$$
+I_j(\theta) = P_j(\theta) \cdot (1 - P_j(\theta))
+$$ {#eq-fisher-info}
+
+其中$P_j(\theta) = \sigma(\theta - \beta_j)$是正确作答的概率。该量衡量了观察题目$j$的作答能告诉我们多少关于$\theta$的信息。
+
+当$P_j(\theta) = 0.5$时费希尔信息量最大，这发生在$\theta = \beta_j$时——即题目难度与模型能力相匹配。直观上，一个模型99%时间答对或答错的题目几乎不透露任何关于模型能力的信息。最有信息量的题目是那些结果不确定的题目。
+
+对于由题目$\{j_1, \ldots, j_K\}$组成的测试，在局部独立性假设下，总信息量是可加的：
+
+$$
+I_{\text{total}}(\theta) = \sum_{k=1}^K I_{j_k}(\theta)
+$$
+
+这种可加性是最优题目选择的基础：我们希望选择一组题目，它们能共同最大化我们所关心的整个能力范围内的总信息量。
+
+{{< include _plt_setup.qmd >}}
+
+```{pyodide-python}
+#| label: fisher-information-design
+#| autorun: true
+#| fig-cap: "费舍信息曲线说明了关键设计原则：当题目难度与应试者的能力相匹配时，题目的信息量最大。"
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+def sigmoid(x):
+    """Numerically stable sigmoid function."""
+    return np.where(x >= 0,
+                    1 / (1 + np.exp(-x)),
+                    np.exp(x) / (1 + np.exp(x)))
+
+theta_range = np.linspace(-4, 4, 200)
+
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+# Information curves for different item difficulties
+difficulties = [-2, -1, 0, 1, 2]
+colors = plt.cm.viridis(np.linspace(0, 1, len(difficulties)))
+
+for beta_j, color in zip(difficulties, colors):
+    P = sigmoid(theta_range - beta_j)
+    info = P * (1 - P)
+    axes[0].plot(theta_range, info, color=color, linewidth=2,
+                 label=f'Item difficulty = {beta_j}')
+
+axes[0].set_xlabel('Ability (θ)')
+axes[0].set_ylabel('Fisher Information')
+axes[0].set_title('Item Information Curves')
+axes[0].legend(fontsize=7)
+axes[0].grid(True, alpha=0.3)
+
+# Cumulative information: adaptive vs random
+np.random.seed(42)
+N, M = 100, 50
+theta_true = np.random.normal(0, 1, N)
+beta_true = np.random.normal(0, 1.5, M)
+
+theta_test = 0.5
+n_items = 20
+
+# Adaptive: choose items closest to current estimate
+beta_available = beta_true.copy()
+adaptive_info = [0]
+theta_estimate = 0
+
+for t in range(n_items):
+    distances = np.abs(beta_available - theta_estimate)
+    best_idx = np.argmin(distances)
+    beta_selected = beta_available[best_idx]
+    P = sigmoid(theta_test - beta_selected)
+    info = P * (1 - P)
+    adaptive_info.append(adaptive_info[-1] + info)
+    beta_available = np.delete(beta_available, best_idx)
+    theta_estimate = theta_test
+
+# Random selection
+random_order = np.random.permutation(len(beta_true))[:n_items]
+random_info = [0]
+for j in random_order:
+    P = sigmoid(theta_test - beta_true[j])
+    info = P * (1 - P)
+    random_info.append(random_info[-1] + info)
+
+axes[1].plot(range(n_items + 1), adaptive_info, 'g-', linewidth=2, label='Adaptive')
+axes[1].plot(range(n_items + 1), random_info, 'b-', linewidth=2, label='Random')
+axes[1].set_xlabel('Number of Items')
+axes[1].set_ylabel('Cumulative Fisher Information')
+axes[1].set_title(f'Information Accumulation (θ = {theta_test})')
+axes[1].legend()
+axes[1].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+
+### 计算机自适应测试 {#sec-cat}
+
+计算机自适应测试（CAT）是优化选题的顺序应用。与对所有模型进行固定测试不同，CAT 会实时调整测试：在每次作答后，根据目前所学，选择下一个信息量最大的题目。
+
+CAT 流程迭代四个步骤：
+
+1. **选择**：根据当前能力估计值，选择信息量最大的题目
+2. **施测**：呈现题目并观察作答
+3. **更新**：利用新数据更新能力估计值
+4. **检查**停止标准；如未满足，返回步骤1
+
+::: {.callout-important title="为何使用费雪信息进行选题？"}
+费雪信息衡量的是题目$j$的作答能告诉我们多少关于$\theta$的信息：
+
+- **高信息量**：题目难度与能力水平匹配良好
+- **低信息量**：题目过于简单或过难
+
+让前沿模型回答$1 + 1$或让一个小模型证明黎曼假设几乎无法提供任何信息。信息量最大的题目，是那些模型有大约50%成功机会的题目。
+:::
+
+
+### CAT 实现 {#sec-cat-implementation}
+
+```{pyodide-python}
+#| label: cat-simulation
+#| autorun: true
+#| fig-cap: "CAT 以明显更少的项目实现了与随机测试相同的测量精度。"
+
+# Generate synthetic data for CAT simulation
+np.random.seed(42)
+N, M = 100, 50
+theta_true = np.random.normal(0, 1, N)
+beta_true = np.random.normal(0, 1.5, M)
+
+def cat_simulation(theta_true_i, beta, n_items_max=30, reliability_threshold=0.95):
+    """
+    Simulate CAT for a single test-taker.
+
+    Parameters
+    ----------
+    theta_true_i : float
+        True ability of the test-taker
+    beta : ndarray
+        Item difficulties (pre-calibrated)
+    n_items_max : int
+        Maximum number of items to administer
+    reliability_threshold : float
+        Stop when reliability exceeds this threshold
+
+    Returns
+    -------
+    dict with theta_hat, n_items, reliability_history, etc.
+    """
+    M = len(beta)
+    administered = []
+    responses = []
+
+    # Prior: theta ~ N(0, 1)
+    theta_hat = 0.0
+    prior_var = 1.0
+
+    theta_history = [theta_hat]
+    reliability_history = [0.0]
+    se_history = [1.0]
+    available_items = list(range(M))
+
+    for t in range(min(n_items_max, M)):
+        # Select item with maximum Fisher information at current estimate
+        best_item = None
+        best_info = -np.inf
+
+        for j in available_items:
+            P_j = sigmoid(theta_hat - beta[j])
+            info_j = P_j * (1 - P_j)
+            if info_j > best_info:
+                best_info = info_j
+                best_item = j
+
+        # Administer item (simulate response from true ability)
+        P_true = sigmoid(theta_true_i - beta[best_item])
+        response = int(np.random.random() < P_true)
+
+        administered.append(best_item)
+        responses.append(response)
+        available_items.remove(best_item)
+
+        # Update ability estimate via MAP (Newton-Raphson)
+        for _ in range(10):
+            P_vec = sigmoid(theta_hat - np.array([beta[j] for j in administered]))
+            grad = np.sum(np.array(responses) - P_vec) - theta_hat / prior_var
+            hess = -np.sum(P_vec * (1 - P_vec)) - 1 / prior_var
+            if abs(hess) > 1e-10:
+                theta_hat = theta_hat - grad / hess
+
+        # Posterior variance and reliability
+        total_info = np.sum([sigmoid(theta_hat - beta[j]) * (1 - sigmoid(theta_hat - beta[j]))
+                           for j in administered])
+        posterior_var = 1 / (1/prior_var + total_info)
+        reliability = 1 - posterior_var / prior_var
+
+        theta_history.append(theta_hat)
+        reliability_history.append(reliability)
+        se_history.append(np.sqrt(posterior_var))
+
+        if reliability >= reliability_threshold:
+            break
+
+    return {
+        'theta_hat': theta_hat, 'n_items': len(administered),
+        'reliability_history': reliability_history,
+        'theta_history': theta_history, 'se_history': se_history,
+        'final_reliability': reliability_history[-1]
+    }
+
+def random_selection_simulation(theta_true_i, beta, n_items_max=30, reliability_threshold=0.95):
+    """Simulate random item selection for comparison."""
+    M = len(beta)
+    item_order = list(np.random.permutation(M)[:n_items_max])
+
+    theta_hat = 0.0
+    prior_var = 1.0
+    administered = []
+    responses = []
+    reliability_history = [0.0]
+    theta_history = [theta_hat]
+
+    for j in item_order:
+        P_true = sigmoid(theta_true_i - beta[j])
+        response = int(np.random.random() < P_true)
+        administered.append(j)
+        responses.append(response)
+
+        for _ in range(10):
+            P_vec = sigmoid(theta_hat - np.array([beta[k] for k in administered]))
+            grad = np.sum(np.array(responses) - P_vec) - theta_hat / prior_var
+            hess = -np.sum(P_vec * (1 - P_vec)) - 1 / prior_var
+            if abs(hess) > 1e-10:
+                theta_hat = theta_hat - grad / hess
+
+        total_info = np.sum([sigmoid(theta_hat - beta[k]) * (1 - sigmoid(theta_hat - beta[k]))
+                           for k in administered])
+        posterior_var = 1 / (1/prior_var + total_info)
+        reliability = 1 - posterior_var / prior_var
+        reliability_history.append(reliability)
+        theta_history.append(theta_hat)
+
+        if reliability >= reliability_threshold:
+            break
+
+    return {'n_items': len(administered), 'reliability_history': reliability_history,
+            'theta_history': theta_history, 'theta_hat': theta_hat,
+            'final_reliability': reliability_history[-1]}
+
+# Run simulations
+np.random.seed(42)
+n_test_takers = 100
+theta_test_sample = np.random.normal(0, 1, n_test_takers)
+
+cat_results = []
+random_results = []
+for theta_i in theta_test_sample:
+    cat_results.append(cat_simulation(theta_i, beta_true))
+    random_results.append(random_selection_simulation(theta_i, beta_true))
+
+cat_items = [r['n_items'] for r in cat_results]
+random_items = [r['n_items'] for r in random_results]
+
+# Plot comparison
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+# Bar chart
+methods = ['Random', 'CAT']
+means = [np.mean(random_items), np.mean(cat_items)]
+stds = [np.std(random_items), np.std(cat_items)]
+bars = axes[0].bar(methods, means, yerr=stds, capsize=5, alpha=0.7,
+                   color=['#1f77b4', '#2ca02c'])
+axes[0].set_ylabel('Items to reach 95% reliability')
+axes[0].set_title('Efficiency: CAT vs Random')
+axes[0].grid(True, alpha=0.3, axis='y')
+for bar, mean, std in zip(bars, means, stds):
+    axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + std + 0.5,
+                f'{mean:.1f}', ha='center', va='bottom', fontsize=11)
+
+# Reliability trajectory
+example_idx = 50
+axes[1].plot(random_results[example_idx]['reliability_history'], 'b-', linewidth=2, label='Random')
+axes[1].plot(cat_results[example_idx]['reliability_history'], 'g-', linewidth=2, label='CAT')
+axes[1].axhline(0.95, color='r', linestyle='--', linewidth=1.5, label='Threshold')
+axes[1].set_xlabel('Items administered')
+axes[1].set_ylabel('Reliability')
+axes[1].set_title(f'Reliability Growth (θ = {theta_test_sample[example_idx]:.2f})')
+axes[1].legend(fontsize=7)
+axes[1].grid(True, alpha=0.3)
+
+# Histogram
+axes[2].hist(random_items, bins=15, alpha=0.6, label='Random', color='#1f77b4')
+axes[2].hist(cat_items, bins=15, alpha=0.6, label='CAT', color='#2ca02c')
+axes[2].set_xlabel('Number of items')
+axes[2].set_ylabel('Frequency')
+axes[2].set_title('Distribution of Test Lengths')
+axes[2].legend()
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+efficiency_gain = (np.mean(random_items) - np.mean(cat_items)) / np.mean(random_items) * 100
+print(f"Random: {np.mean(random_items):.1f} ± {np.std(random_items):.1f} items")
+print(f"CAT: {np.mean(cat_items):.1f} ± {np.std(cat_items):.1f} items")
+print(f"Efficiency gain: {efficiency_gain:.1f}% fewer items with CAT")
+```
+
+
+### 停止规则与实际考虑 {#sec-stopping}
+
+CAT需要一个停止准则。常见的选择包括：
+
+1. **信度阈值**：当 $R = 1 - \sigma^2_{\text{post}} / \sigma^2_{\text{prior}} \geq 0.95$ 时停止
+2. **标准误阈值**：当 $\text{SE}(\hat{\theta}) \leq 0.3$ 时停止
+3. **固定长度**：恰好施测 $K$ 个题目
+4. **信息量阈值**：当额外题目提供的信息微不足道时停止
+
+对于AI评估，实际约束与统计准则相互影响：
+
+- **成本**：每次API调用都有金钱成本；停止规则应考虑到评估预算。
+- **时间**：评估必须在截止日期内完成。
+- **污染风险**：从同一题库施测过多题目，存在基准数据泄漏到训练数据中的风险。
+
+::: {.callout-note title="用于AI评估的CAT"}
+传统CAT假定反应是确定性的：人类被试若被问及同一问题两次，会给出相同答案。AI模型则不一定，这取决于温度参数和采样设置。
+
+对于确定性评估（温度=0），CAT可直接适用。对于随机性评估，我们可能需要对每个题目采集多个样本，或者使用能处理反应变异性的方法。
+
+CAT还要求预先校准好的题目参数。在冷启动场景（新的基准）下，我们必须在部署CAT之前，先在一个模型试点样本上收集数据。这与@sec-cold-start 中解决的冷启动预测问题相关。
+:::
+
+
+### D-最优设计 {#sec-d-optimal}
+
+CAT是*序贯*最优设计——它每次只选择一个题目。但有时我们需要设计一个固定测验：从包含 $M$ 个候选题目的题库中选出 $K$ 个题目，一次性施测给所有模型。这就是经典的*最优实验设计*问题。
+
+对于一个 $K$ 维因子模型，其能力向量为 $U_i \in \mathbb{R}^K$，施测一题目集合 $\mathcal{J}$ 所得的费舍信息矩阵为：
+
+$$
+\mathcal{I}(\theta; \mathcal{J}) = \sum_{j \in \mathcal{J}} P_j(\theta)(1 - P_j(\theta)) \, V_j V_j^\top
+$$
+
+其中 $V_j \in \mathbb{R}^K$ 是题目 $j$ 的因子载荷向量。不同的最优性准则会导致不同的选题策略：
+
+- **D-最优**：最大化 $\det(\mathcal{I})$——即置信椭球体的体积。这最小化了能力估计的广义方差。
+- **A-最优**：最小化 $\text{tr}(\mathcal{I}^{-1})$——即各能力分量方差的平均值。
+- **E-最优**：最大化 $\lambda_{\min}(\mathcal{I})$——即最小特征值。这确保没有任何一个能力维度被估计得很差。
+
+```{pyodide-python}
+#| label: d-optimal-design
+#| autorun: true
+#| fig-cap: "D-最优选题策略会选择难度多样的题目以覆盖目标能力范围，其产生的总信息量远高于随机选题。"
+
+from scipy.optimize import minimize as sp_minimize
+
+def compute_test_information(item_indices, beta_pool, theta_grid):
+    """Compute total Fisher information of a test across an ability grid."""
+    total_info = np.zeros_like(theta_grid)
+    for j in item_indices:
+        P = sigmoid(theta_grid - beta_pool[j])
+        total_info += P * (1 - P)
+    return total_info
+
+def d_optimal_greedy(beta_pool, K, theta_grid):
+    """Greedy D-optimal item selection for the Rasch model.
+
+    Selects K items from the pool to maximize total information
+    integrated over the theta grid (approximating D-optimality
+    for the unidimensional case).
+    """
+    available = list(range(len(beta_pool)))
+    selected = []
+
+    for _ in range(K):
+        best_item = None
+        best_score = -np.inf
+
+        for j in available:
+            candidate = selected + [j]
+            info = compute_test_information(candidate, beta_pool, theta_grid)
+            # D-optimal criterion: product of information values
+            # (log-determinant in 1D = log of information)
+            score = np.sum(np.log(info + 1e-10))
+            if score > best_score:
+                best_score = score
+                best_item = j
+
+        selected.append(best_item)
+        available.remove(best_item)
+
+    return selected
+
+# Large item pool
+np.random.seed(42)
+M_pool = 200
+beta_pool = np.random.normal(0, 2, M_pool)
+K = 20  # Select 20 items
+
+theta_grid = np.linspace(-3, 3, 100)
+
+# D-optimal selection
+d_optimal_items = d_optimal_greedy(beta_pool, K, theta_grid)
+
+# Random selection (multiple draws for comparison)
+random_infos = []
+for trial in range(50):
+    random_items = np.random.choice(M_pool, K, replace=False)
+    info = compute_test_information(random_items, beta_pool, theta_grid)
+    random_infos.append(info)
+
+d_opt_info = compute_test_information(d_optimal_items, beta_pool, theta_grid)
+random_mean = np.mean(random_infos, axis=0)
+random_std = np.std(random_infos, axis=0)
+
+# Visualization
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+# Test information functions
+axes[0].plot(theta_grid, d_opt_info, 'g-', linewidth=2, label='D-optimal')
+axes[0].plot(theta_grid, random_mean, 'b-', linewidth=2, label='Random (mean)')
+axes[0].fill_between(theta_grid, random_mean - random_std, random_mean + random_std,
+                     alpha=0.2, color='blue')
+axes[0].set_xlabel('Ability (θ)')
+axes[0].set_ylabel('Test Information')
+axes[0].set_title('Test Information Function')
+axes[0].legend(fontsize=7)
+axes[0].grid(True, alpha=0.3)
+
+# Selected item difficulties
+axes[1].hist(beta_pool[d_optimal_items], bins=12, alpha=0.7, color='green',
+             label='D-optimal', density=True)
+axes[1].hist(beta_pool, bins=30, alpha=0.3, color='gray',
+             label='Full pool', density=True)
+axes[1].set_xlabel('Item Difficulty (β)')
+axes[1].set_ylabel('Density')
+axes[1].set_title('Selected Item Difficulties')
+axes[1].legend(fontsize=7)
+axes[1].grid(True, alpha=0.3)
+
+# Integrated information comparison
+d_opt_total = np.trapz(d_opt_info, theta_grid)
+random_totals = [np.trapz(ri, theta_grid) for ri in random_infos]
+
+axes[2].hist(random_totals, bins=15, alpha=0.6, color='blue', label='Random')
+axes[2].axvline(d_opt_total, color='green', linewidth=2, linestyle='--',
+                label=f'D-optimal ({d_opt_total:.1f})')
+axes[2].set_xlabel('Integrated Information')
+axes[2].set_ylabel('Frequency')
+axes[2].set_title('Total Information Comparison')
+axes[2].legend(fontsize=7)
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+print(f"D-optimal integrated info: {d_opt_total:.1f}")
+print(f"Random integrated info: {np.mean(random_totals):.1f} ± {np.std(random_totals):.1f}")
+print(f"D-optimal advantage: {(d_opt_total / np.mean(random_totals) - 1) * 100:.1f}% more information")
+```
+
+D-最优设计生成的题库中，试题难度分布于目标能力范围，确保任何能力点都有较高信息量。随机选题往往会使题目集中在题库难度分布的中心，导致两端覆盖不足。
+
+### 成对比较设计 {#sec-paired-design}
+
+当评估基于成对比较时（如第1章的聊天机器人竞技场），设计问题就变了一种形式。我们不再是选择试题，而是要决定比较哪些模型对。在布拉德利-特里模型下，比较模型 $i$ 与 $k$ 关于它们的实力差异 $\theta_i - \theta_k$ 的信息量为：
+
+$$
+I_{ik}(\theta) = P_{ik}(1 - P_{ik}), \quad P_{ik} = \sigma(\theta_i - \theta_k)
+$$
+
+当两个模型势均力敌时，该信息量达到最大（$P_{ik} = 0.5$，即 $\theta_i = \theta_k$）。设计问题就是选择一个锦标赛赛程——比较哪些模型对，以及各比较多少次——以最大化评分估计的精度。
+
+经典的方案包括**平衡不完全区组设计**（balanced incomplete block designs，BIBDs），其中每对模型被比较的次数相同。在AI评估竞技场中，自适应匹配算法的角色与计算机自适应测验（CAT）相同：它根据当前评分估计，选择信息量最大的对阵。这正是聊天机器人竞技场在配对Elo评分相近的模型时所做的。
+
+
+## 讨论题 {#sec-efficient-discussion}
+
+1. **面向AI的自适应测试。** 在AI评估中部署CAT面临哪些实际挑战？请考虑：模型响应的确定性、API调用成本、基准污染以及需要预先校准的试题。
+
+2. **最优设计与固定设计。** 在什么情况下应使用自适应测试（CAT），而不是固定的D-最优测试？在实际中，哪些因素决定了这一选择？
+
+3. **成对比较设计。** 聊天机器人竞技场采用自适应匹配来配对Elo评分相近的模型。与均衡锦标赛设计相比，这种方法有哪些优点和缺点？
+
+4. **评估预算。** 一个团队有固定的10 000次API调用预算，要在包含500道试题的基准上评估50个模型。请设计一个在此约束下能最大化测量精度的评估策略。
+
+
+## 文献注释 {#sec-efficient-bib}
+
+### 最优实验设计
+
+最优实验设计的理论起源于 @kiefer1959optimum。D-最优设计在 @atkinson2007optimum 中有所论述。关于费希尔信息与IRT中试题设计的联系，请参见 @van2006optimal 和 @chang2009nonlinear。@wright1979best 对拉希模型下的试题设计提供了易懂的介绍。
+
+### 计算机自适应测验
+
+CAT 有着丰富的历史，始于 @lord1970some 的工作。用于项目选择的费希尔信息准则由 @birnbaum1968some 提出。关于多维 CAT，请参阅 @segall1996multidimensional。在 AI 评估中的应用正在兴起；关于高效基准设计的最新研究，请参阅 @polo2024tinybenchmarks。@truong2025irsl 展示了在标度律环境下自适应测验的实际影响：通过将经 IRT 校准的项目参数与基于 Elo 评级的自适应项目选择相结合，他们仅用每个基准 50 道题目就达到了与全量评估相当的决策准确性——查询预算减少了 99.9%。
+
+
+## 练习 {#sec-efficient-exercises}
+
+### 理论练习
+
+**练习 3.1** ($\star$)：证明费希尔信息量 $I_j(\theta) = P_j(\theta)(1 - P_j(\theta))$ 在 $\theta = \beta_j$ 时达到最大，且最大值为 $1/4$。
+
+**练习 3.2** ($\star\star$)：对于双参数逻辑斯谛(2PL)模型 $P_j(\theta) = \sigma(a_j(\theta - \beta_j))$，推导费希尔信息量并证明其等于 $a_j^2 P_j(1 - P_j)$。区分度参数 $a_j$ 如何影响最优项目选择？
+
+**练习 3.3** ($\star\star$)：为 CAT 设计一种终止规则，以平衡测量精度与评估成本。假设每次 API 调用费用为 \$0.01，降低一单位标准误的价值为 \$1。找出成本最优的终止点。
+
+### 计算练习
+
+**练习 3.4** ($\star\star$)：将 D-最优设计模拟扩展到具有 $K = 2$ 个因子的二维因子模型。使用 $j^* = \arg\max_j \det(\mathcal{I} + I_j)$ 实现项目选择，其中 $I_j = P_j(1 - P_j) V_j V_j^\top$。将所选项目的因子载荷向量与随机选择进行比较。
+
+**练习 3.5** ($\star\star$)：比较 CAT 在不同能力水平模型下的收敛情况。对于极端能力（非常高或非常低），CAT 是否需要更多的项目？为什么？
+
+**练习 3.6** ($\star\star$)：研究 CAT 对项目参数错误设定的敏感性。如果校准样本与测试群体存在系统性差异，CAT 的性能将如何下降？模拟这种情景。

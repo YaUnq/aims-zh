@@ -1,0 +1,109 @@
+# 符号表 {#sec-notation}
+
+本附录汇总全书使用的符号。符号按主题分组；**引入章节**列表示每个符号首次出现的章节。
+
+## 通用
+
+| 符号 | 含义 | 定义域 | 引入章节 |
+|--------|---------|--------|------------|
+| $N$ | 人或模型的数量 | $\mathbb{N}$ | @sec-foundations |
+| $M$ | 题目或问题的数量 | $\mathbb{N}$ | @sec-foundations |
+| $Y_{ij}$ | 模型 $i$ 对题目 $j$ 的二元回答（0 = 错误，1 = 正确） | $\{0,1\}$ | @sec-foundations |
+| $S_i = \sum_j Y_{ij}$ | 模型 $i$ 的总分（答对总数） | $\{0, 1, \ldots, M\}$ | @sec-foundations |
+| $\sigma(x) = \frac{1}{1+e^{-x}}$ | logistic sigmoid 函数 | $(0,1)$ | @sec-foundations |
+| $\Phi(x)$ | 标准正态分布 CDF | $(0,1)$ | @sec-foundations |
+
+## 题目反应理论
+
+| 符号 | 含义 | 定义域 | 引入章节 |
+|--------|---------|--------|------------|
+| $\theta_i$ or $U_i$ | 模型 $i$ 的潜在能力 | $\mathbb{R}$ | @sec-foundations |
+| $\beta_j$ or $V_j$ | 题目 $j$ 的难度 | $\mathbb{R}$ | @sec-foundations |
+| $a_j$ | 题目 $j$ 的区分度参数 | $\mathbb{R}^+$ | @sec-foundations |
+| $c_j$ | 题目 $j$ 的猜测（伪机会）参数 | $[0,1]$ | @sec-foundations |
+| $d_j$ | 区分度参数（替代记号，如 1PL/2PL 中所用） | $\mathbb{R}^+$ | @sec-foundations |
+| $z_j$ | 难度参数（替代记号） | $\mathbb{R}$ | @sec-foundations |
+| $I_j(\theta)$ | 能力为 $\theta$ 时题目 $j$ 的 Fisher 信息 | $\mathbb{R}^+$ | @sec-efficient |
+| $\mathcal{I}(\theta)$ | Fisher 信息矩阵 | $\mathbb{R}^{K \times K}$ | @sec-efficient |
+
+## 学习与估计
+
+| 符号 | 含义 | 定义域 | 引入章节 |
+|--------|---------|--------|------------|
+| $\ell(\theta, \beta)$ | 对数似然函数 | $\mathbb{R}$ | @sec-learning |
+| $\nabla_\theta \ell$ | 关于能力参数的对数似然梯度 | $\mathbb{R}^N$ | @sec-learning |
+| $\pi(\theta)$ | 能力上的先验分布 | -- | @sec-learning |
+| $\pi(\beta)$ | 难度上的先验分布 | -- | @sec-learning |
+| $\hat{\theta}_{\text{MLE}}$ | 能力的最大似然估计 | $\mathbb{R}^N$ | @sec-learning |
+| $\hat{\theta}_{\text{MAP}}$ | 能力的最大后验估计 | $\mathbb{R}^N$ | @sec-learning |
+| $\eta$ | 学习率 | $\mathbb{R}^+$ | @sec-learning |
+
+## 信度
+
+| 符号 | 含义 | 定义域 | 引入章节 |
+|--------|---------|--------|------------|
+| $X_{ij}$ | 模型 $i$ 在场合或题目 $j$ 上的观测分数 | $\mathbb{R}$ | @sec-reliability |
+| $T_i$ | 模型 $i$ 的真分数（CTT） | $\mathbb{R}$ | @sec-reliability |
+| $E_{ij}$ | 误差成分（CTT） | $\mathbb{R}$ | @sec-reliability |
+| $\rho_{XX'}$ | 信度系数 | $[0,1]$ | @sec-reliability |
+| $\alpha$ | Cronbach's alpha | $(-\infty, 1]$ | @sec-reliability |
+| $\sigma^2_p, \sigma^2_i, \sigma^2_r$ | 方差成分：人（模型）、题目、评分者 | $\mathbb{R}^+$ | @sec-reliability |
+| $G$ | 可概化系数 | $[0,1]$ | @sec-reliability |
+| $n_r, n_i$ | D-study 设计中的评分者数量和题目数量 | $\mathbb{N}$ | @sec-reliability |
+| $\kappa$ | Cohen's kappa（评分者间一致性） | $[-1, 1]$ | @sec-reliability |
+
+## 效度
+
+| 符号 | 含义 | 定义域 | 引入章节 |
+|--------|---------|--------|------------|
+| $g \in \{0,1\}$ | 群体成员指示变量（DIF 分析） | $\{0,1\}$ | @sec-validity |
+| $\alpha_{MH}$ | Mantel-Haenszel 优势比 | $\mathbb{R}^+$ | @sec-validity |
+| $\lambda_k$ | 相关矩阵的第 $k$ 个特征值 | $\mathbb{R}$ | @sec-validity |
+| $\text{MNSQ}_i$ | 题目 $i$ 的均方拟合统计量 | $\mathbb{R}^+$ | @sec-validity |
+| $r_{ij}$ | 方法 $j$ 测量的特质 $i$ 之间的相关（MTMM） | $[-1,1]$ | @sec-validity |
+
+## 因果性与分布偏移
+
+| 符号 | 含义 | 定义域 | 引入章节 |
+|--------|---------|--------|------------|
+| $\text{do}(X = x)$ | 将变量 $X$ 设置为值 $x$ 的干预 | -- | @sec-causality |
+| $P^{(s)}, P^{(t)}$ | 源（基准）分布和目标（部署）分布 | -- | @sec-causality |
+| $\pi_0(a \mid x)$ | 日志（基准）策略 | $[0,1]$ | @sec-causality |
+| $\pi(a \mid x)$ | 目标（部署）策略 | $[0,1]$ | @sec-causality |
+| $w(x)$ | 重要性权重 $P^{(t)}(x)/P^{(s)}(x)$ | $\mathbb{R}^+$ | @sec-causality |
+| $\hat{r}(x, a)$ | 奖励模型（例如 IRT 预测） | $[0,1]$ | @sec-causality |
+| $\hat{V}_{\text{DR}}$ | 双重稳健价值估计量 | $\mathbb{R}$ | @sec-causality |
+| $C_\alpha(x)$ | 水平为 $\alpha$ 的 conformal prediction set | $\mathcal{Y}$ 的子集 | @sec-causality |
+
+## 信息与机制设计
+
+| 符号 | 含义 | 定义域 | 引入章节 |
+|--------|---------|--------|------------|
+| $F$ | 任务全集 | 有限集合，$\|F\| = N$ | @sec-evaluation-game |
+| $F_E, F_M$ | 评估者和构建者的任务集合 | $F_E, F_M \subseteq F$ | @sec-evaluation-game |
+| $\pi_E, \pi_M$ | 评估者和构建者的采样分布 | $F$ 上的分布 | @sec-evaluation-game |
+| $f(\theta)$ | 任务表现函数 | $[0,1]$ | @sec-evaluation-game |
+| $u_E(\theta)$ | 评估者效用：$\sum_{f \in F} f(\theta)$ | $\mathbb{R}^+$ | @sec-evaluation-game |
+| $k$ | 每轮采样的评估任务数量 | $\mathbb{N}$ | @sec-evaluation-game |
+| $\rho$ | 分布校正率 | $(0,1]$ | @sec-evaluation-game |
+| $\gamma$ | 博弈惩罚权重 | $\mathbb{R}^+$ | @sec-evaluation-game |
+| $\Delta_t$ | 第 $t$ 轮的残余错位 | $[0,1]$ | @sec-evaluation-game |
+| $C$ | 智能体成本（委托-代理模型） | $\mathbb{R}^+$ | @sec-evaluation-game |
+| $b$ | 委托人从智能体努力中获得的价值 | $\mathbb{R}^+$ | @sec-evaluation-game |
+
+## 红队与对抗性评估
+
+| 符号 | 含义 | 定义域 | 引入章节 |
+|--------|---------|--------|------------|
+| $\theta_j^{(\text{adv})}$ | 模型 $j$ 的对抗鲁棒性 | $\mathbb{R}$ | @sec-redteaming |
+| $\theta_j^{(\text{std})}$ | 模型 $j$ 的标准准确率能力 | $\mathbb{R}$ | @sec-redteaming |
+| $\beta_i^{(\text{atk})}$ | 对抗题目 $i$ 的攻击强度（难度） | $\mathbb{R}$ | @sec-redteaming |
+| $\delta$ | 施加到输入上的扰动 | $\mathcal{B}_\epsilon$ | @sec-redteaming |
+| $\alpha_{s,\mathcal{D}}$ | 在准则 $s$ 和目标分布 $\mathcal{D}$ 下的攻击成功概率 | $[0,1]$ | @sec-redteaming |
+| $J$ | 攻击成功的操作性判定器 | $\{0,1\}$ | @sec-redteaming |
+| $s$ | oracle（真实）成功准则 | $\{0,1\}$ | @sec-redteaming |
+| $K$ | Top-1 聚合中的重复采样次数 | $\mathbb{N}$ | @sec-redteaming |
+| $\hat{\mu}_{\text{syn}}$ | 从合成题目估计的平均表现 | $[0,1]$ | @sec-redteaming |
+| $\hat{\mu}_{\text{human}}$ | 从人工编写题目估计的平均表现 | $[0,1]$ | @sec-redteaming |
+| $\hat{\mu}_{\text{PPI}}$ | prediction-powered inference 估计量 | $[0,1]$ | @sec-redteaming |
+| $n$ | 人工评估题目的数量 | $\mathbb{N}$ | @sec-redteaming |

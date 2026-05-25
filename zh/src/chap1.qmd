@@ -1,0 +1,723 @@
+---
+format:
+  html:
+    include-after-body:
+      text: |
+        <script>
+        document.addEventListener('DOMContentLoaded', function() {
+          function waitForPyodide() {
+            if (typeof globalThis.mainPyodide !== 'undefined' && globalThis.mainPyodide) {
+              if (typeof globalThis.qpyodideCellDetails !== 'undefined') {
+                globalThis.qpyodideCellDetails.forEach((cell, index) => {
+                  if (cell.options && cell.options.autorun === 'true') {
+                    setTimeout(() => {
+                      const runButton = document.querySelector(`#qpyodide-button-run-${cell.id}`);
+                      if (runButton && !runButton.disabled) {
+                        runButton.click();
+                      }
+                    }, index * 1000);
+                  }
+                });
+              }
+            } else {
+              setTimeout(waitForPyodide, 500);
+            }
+          }
+          setTimeout(waitForPyodide, 2000);
+        });
+        </script>
+filters:
+  - pyodide
+pyodide:
+  packages:
+    - numpy
+    - matplotlib
+---
+
+# 数据全景 {#sec-data-landscape}
+
+::: {.callout-note title="预期学习成果"}
+在本章结束时，你将能够：
+
+1. **描述** 响应矩阵 $Y_{ij}$ 是支撑人工智能评估的通用数据结构，并能识别不同评估范式下“受试者”与“项目”的具体所指。
+2. **分类** 人工智能基准测试的多维坐标：领域、响应类型、评估结构与文化范围。
+3. **阐明** 基准构建中的设计选择——项目筛选、评分准则、响应格式——如何塑造最终的响应矩阵并约束后续分析。
+4. **识别** 人工智能评估中的实际数据质量问题：稀疏性、缺失数据、评分不一致以及基准污染。
+5. **使用** `torch_measure` 工具包加载、检查并可视化来自真实基准的响应矩阵。
+:::
+
+::: {.callout-tip title="建议授课计划" collapse="true"}
+本章可安排为 **1 次课**（75–90 分钟）：
+
+- 响应矩阵抽象概念（15 分钟）
+- 人工智能基准分类体系（20 分钟）
+- 多语言、多文化及领域特定评估（15 分钟）
+- 偏好数据与成对比较（10 分钟）
+- 数据质量与实际课题（10 分钟）
+- 实操：用 `torch_measure` 加载并探索基准（15 分钟）
+:::
+
+
+## 响应矩阵 {#sec-response-matrix}
+
+无论多么复杂，每一项人工智能评估最终都会产出一张表格：行是被评估的系统（模型、智能体、模型–脚手架组合），列是评估项目（问题、任务、提示），而每个条目记录着每个系统在每项上的表现。这就是**响应矩阵**。
+
+::: {.callout-note title="定义：响应矩阵"}
+**响应矩阵** $Y \in \mathbb{R}^{N \times M}$ 记录 $N$ 个受试者（模型）在 $M$ 个项目（任务）上的表现。条目 $Y_{ij}$ 可以是：
+
+- **二元的**：$Y_{ij} \in \{0, 1\}$（正确/错误，通过/失败，已解决/未解决）
+- **连续的**：$Y_{ij} \in [0, 1]$（pass@1 率，部分得分，token 概率）
+- **缺失的**：$Y_{ij} = \texttt{NaN}$（模型未在该项目上被评估）
+
+响应矩阵是测量科学的基础数据结构。本书中所有模型——IRT、因子模型、Bradley-Terry——都直接或通过变换后对响应矩阵进行操作。
+:::
+
+这一抽象虽然简洁，却具有很强的迷惑性。同一 $N \times M$ 矩阵结构容纳了截然不同的评估范式：
+
+| 评估类型 | 行（主体） | 列（题目） | 取值 | 示例 |
+|----------------|-------------|----------------|------|------|
+| 知识问答 | LLMs | 多项选择题 | 二元 | MMLU-Pro (48 × 12,257) [@wang2024mmlupro] |
+| 代码生成 | LLMs | 编程问题 | 二元或pass@1 | BigCodeBench (153 × 1,140) [@zhuo2025bigcodebench] |
+| 智能体任务 | 智能体 + 脚手架 | 多步交互轨迹 | 二元 | SWE-bench (134 × 500) [@jimenez2023swe] |
+| 函数调用 | LLMs | API调用规范 | 二元 | BFCL (93 × 4,751) [@patil2025bfcl] |
+| 网页导航 | 智能体 + 脚手架 | 网页交互任务 | 二元 | WebArena (14 × 812) [@zhou2024webarena] |
+| 终端任务 | 智能体 + 脚手架 | 系统管理任务 | 连续 | Terminal-Bench (128 × 89) [@merrill2026terminalbench] |
+| 代码推理 | LLMs | 输入/输出预测 | 连续 | CRUXEval (38 × 800) [@gu2024cruxeval] |
+
+关键设计决策在于什么算作一个“主体”（subject）。对于知识基准测试，主体通常是一个单独的LLM。对于智能体基准测试，主体是模型与脚手架的组合同（例如，SWE-Agent + Claude Sonnet 4），因为脚手架的搜索策略、工具使用和错误恢复对性能贡献很大。这一区别对测量至关重要：如果脚手架引入了方差，那么通过IRT估计的模型“能力”部分反映的是脚手架，而非模型本身。
+
+### 形状与稀疏性
+
+人工智能评估中的响应矩阵常常极度稀疏或形状奇特。一个包含500道题目的基准测试，在134个模型－脚手架组合同上评估（SWE-bench Verified [@jimenez2023swe]），会生成一个稠密矩阵。但在一个基准测试生态系统中，如果模型在不同子集上评估——因为基准测试随时间演变，或者计算资源限制了哪些模型能在哪些题目上运行——就会产生带有系统性缺失数据的矩阵。
+
+LiveCodeBench [@jain2024livecodebench] 就是一个例子：其72个模型 × 1055道题的矩阵仅有88.8%的填充率，因为较旧的模型只在早期的题目集（713或880道题）上评估，而较新的模型完成了全部1055道题。这并非随机缺失——这是设计性缺失，且缺失模式本身包含信息（较新的模型往往能力更强）。
+
+理解响应矩阵的形状与稀疏性是选择正确模型的前提。稠密、矩形的矩阵适合标准IRT和因子模型。稀疏或系统性不完整的矩阵则需要能显式处理缺失数据的模型，或能解释缺失机制的数据填补策略。
+
+## 人工智能基准测试的分类 {#sec-taxonomy}
+
+人工智能评估的格局迅速扩展。为了理清脉络，我们沿四个轴对基准测试进行分类：**领域**、**响应类型**、**评估结构**和**文化范围**。
+
+### 按领域划分 {#sec-domain-taxonomy}
+
+基准测试汇聚成广泛的能力领域，每个领域都有各自不同的项目特征和效度考量。
+
+**知识与推理。** 像 MMLU-Pro（14 个领域共 12,257 个项目）[@wang2024mmlupro]、LiveBench [@white2025livebench] 和 HLE [@phan2026hle] 这样的基准测试通过多项选择或简答题来测试事实知识和推理。项目通常是独立的、自动评分的，并且取自现有考试或专家编写的题目库。主要的效度问题是构念代表性不足：一项只测试事实记忆的“推理”基准测试无法衡量推理能力。
+
+**代码生成与软件工程。** 这是最大也最多样化的类别，涵盖基本函数补全（EvalPlus: HumanEval+ 和 MBPP+ [@liu2023evalplus]）、竞赛编程（LiveCodeBench：来自 AtCoder、LeetCode 和 CodeForces 的 1,055 个问题 [@jain2024livecodebench]）、库感知代码生成（BigCodeBench：使用 139 个 API 的 1,140 个任务 [@zhuo2025bigcodebench]）、代码推理（CRUXEval：800 个输入/输出预测问题 [@gu2024cruxeval]）、代码编辑（EditBench：540 个编辑任务 [@chi2026editbench]），以及完整的软件工程（SWE-bench：解决真实的 GitHub 问题 [@jimenez2023swe]）。从函数补全到问题解决的进展代表着生态效度的提升——同时也增加了自动评分的难度。
+
+**智能体任务。** 这是一个快速增长的类别，其中“被试”并非单纯的模型，而是模型与脚手架（scaffold）结合体在交互环境中运行。示例包括网页导航（WebArena：跨越电子商务、论坛和 CMS 站点的 812 个任务 [@zhou2024webarena]）、移动设备自动化（AndroidWorld：116 个任务 [@rawles2025androidworld]）、桌面交互（OSWorld [@xie2024osworld]）、多应用协调（AppWorld：24 个任务 [@trivedi2024appworld]）以及终端操作（Terminal-Bench：89 个系统管理任务 [@merrill2026terminalbench]）。智能体基准测试带来了独特的测量挑战：“项目”是一个多步骤的情节，性能既取决于模型也取决于脚手架，评分可能需要环境回滚和验证。
+
+**工具使用与函数调用。** BFCL（22 个类别共 4,751 个项目）[@patil2025bfcl] 和 ToolBench [@xu2023toolbench] 测试模型能否正确调用 API、解析模式以及处理多轮工具交互。这些基准测试介于纯语言任务和智能体任务之间——它们测试的是特定能力（结构化输出生成），而非端到端的任务完成。
+
+**安全、安保与红队测试。** 该类别涵盖网络安全挑战（CyBench: 40 CTF 任务 [@zhang2025cybench]）、工具使用智能体的安全性（AgentDojo: 949 安全项 [@debenedetti2024agentdojo]），以及红队测试——对模型是否可能被诱导产生有害输出而进行的对抗性评估。红队测试数据具有天然的响应矩阵结构：行是模型，列是攻击提示，值为二值（安全/不安全）。HarmBench（400 条提示，覆盖 7 个有害类别）[@mazeika2024harmbench] 提供了标准化的红队测试基准；BeaverTails（334K 条提示，带有细粒度安全标注）[@ji2023beavertails] 和 DecodingTrust（243K 条提示，覆盖 8 个可信维度）[@wang2024decodingtrust] 则提供了更大规模的评估。SafetyBench（11,435 道多选题，覆盖 7 个安全类别）[@zhang2024safetybench] 以传统的多选题形式测试安全知识，而 WMDP（3,668 道多选题，涉及生物安全、网络安全和化学安全）[@li2024wmdp] 评估危险知识，以此作为 CBRN 风险的代理指标。这些基准的独特之处在于，“正确”的回应通常是*拒绝回答*，且其构念（安全性）本质上是对抗性的——今天在安全基准上表现完美的模型，明天可能无法应对新出现的攻击。
+
+**偏好与奖励建模。** 诸如 RewardBench [@lambert2024rewardbench]、AlpacaEval（805 条指令）[@li2023alpacaeval]、MT-Bench [@zheng2023judging]、Arena Hard [@li2024arenahard]、WildBench [@lin2024wildbench] 和 Chatbot Arena（超过 14 万次比较）[@chiang2024chatbotarena] 等基准，通过人工或自动化的偏好判断来评估模型质量。响应矩阵的结构有所不同：条目不再是 $Y_{ij} \in \{0,1\}$，而是可能代表获胜率、Elo 评分或成对比较结果。我们将在 @sec-preference-data 节单独讨论这种结构。
+
+### 按响应类型划分 {#sec-response-types}
+
+响应的粒度决定了哪些测量模型是合适的。
+
+**二值响应**（$Y_{ij} \in \{0,1\}$）是最简单也是最常见的。标准的 IRT 模型（Rasch、2PL、3PL）就是为二值数据设计的。大多数代码生成和知识基准采用二值计分：答案要么正确，要么错误。
+
+**连续响应**（$Y_{ij} \in [0,1]$）源于部分给分评分、pass@$k$ 估计（其中 $Y_{ij}$ 是 $k$ 个样本上的经验通过率）或基于评分量规的评估。Terminal-Bench 以 0--100 的评分对任务进行打分 [@merrill2026terminalbench]；CRUXEval 从 10 个样本中报告 pass@1 [@gu2024cruxeval]。连续响应比二值响应包含更丰富的信息，并催生了像 Beta-IRT（@sec-learning）这样的扩展模型。
+
+**有序响应**（$Y_{ij} \in \{1, 2, \ldots, L\}$）源于李克特量表的评分量规（例如，1--5 质量评分）。分级响应模型和部分给分模型将 IRT 扩展到有序数据，但在当前的 AI 评估中，这些模型还不太常见。
+
+**偏好数据**（$Y_{ij} \in \{A, B, \text{tie}\}$）来自两两比较，具有根本不同的结构，在 @sec-preference-data 中讨论。
+
+### 按评估结构分类 {#sec-eval-structure}
+
+**静态基准测试**具有固定的题目集，每个模型评估一次。现有的大多数基准测试都是静态的。其优点是可重现性；缺点则是易受污染和饱和的影响。
+
+**动态基准测试**随时间添加新题目（LiveBench [@white2025livebench]、LiveCodeBench [@jain2024livecodebench]），或者通过对抗方式生成题目（DynaBench [@kiela2021dynabench]）。LiveCodeBench 从进行中的编程竞赛中选题，确保题目日期晚于模型训练截止日期 [@jain2024livecodebench]。测量上的挑战在于保持量表的可比性：如果题目池发生变化，不同时间段的能力估计在没有等值（equating）程序的情况下无法直接比较。
+
+**交互式基准测试**需要模型与环境或人类评估者之间进行多轮交互。Chatbot Arena [@chiang2024chatbotarena]、WebArena [@zhou2024webarena] 和 Terminal-Bench [@merrill2026terminalbench] 都是交互式的。这里的“题目”不是一个静态问题，而是一个动态情节，其难度取决于模型先前的动作。标准的项目反应理论（IRT）假定题目参数是固定的且与被试无关——而交互式基准测试可能违反这一假设。
+
+### 完整基准测试清单 {#sec-benchmark-inventory}
+
+以下表格列举了 `torch_measure` 集合中整理的全部 84 项基准测试，按领域组织并按发布日期排序。这些基准测试共包含超过 450 万个不重复的评估题目和超过 6,700 条模型/智能体记录，其中 69 项基准提供了完整的逐题作答矩阵。
+
+::: {.callout-note title="基准测试清单（70 项基准，120 万+ 题目，6,700+ 受试者）" collapse="true"}
+
+**知识与推理**
+
+| # | 基准测试 | $N \times M$ | 类型 | 评估方法 | 发布日期 | 参考文献 |
+|:--|-----------|:---:|:---:|-------------------|:---:|-----------|
+| 1 | ARC-AGI v1 | 52 × 400 | Bin | 网格输出匹配；视觉抽象推理 | 2019-11 | [arXiv:1911.01547](https://arxiv.org/abs/1911.01547) |
+| 2 | MMLU-Pro | 48 × 12,257 | Bin | 多项选择题；10 选项题目上的精确匹配 | 2024-06 | [arXiv:2406.01574](https://arxiv.org/abs/2406.01574) |
+| 3 | LiveBench | 195 × 494 | Con | 按评分标准评分；每月更新，自动评分 | 2024-06 | [arXiv:2406.19314](https://arxiv.org/abs/2406.19314) |
+| 4 | ARC-AGI v2 | 28 × 120 | Bin | 网格输出匹配；更难的视觉推理 | 2024-12 | [arcprize](https://huggingface.co/arcprize) |
+| 5 | HLE | 19 × 1,792 | Bin | 多选题 + 开放式问题；专家编写，LLM 评分 | 2025-01 | [arXiv:2501.14249](https://arxiv.org/abs/2501.14249) |
+| 6 | MathArena | 68 × 336 | Con | 精确匹配；竞赛题目（AIME, AMC） | 2025-03 | [matharena.ai](https://matharena.ai/) |
+
+**代码生成与软件工程**
+
+| # | Benchmark | $N \times M$ | Type | Evaluation Method | Released | Reference |
+|:--|-----------|:---:|:---:|-------------------|:---:|-----------|
+| 7 | EvalPlus | 31 × 542 | Bin | 单元测试；增强测试套件 | 2023-05 | [arXiv:2305.01210](https://arxiv.org/abs/2305.01210) |
+| 8 | SWE-bench Verified | 134 × 500 | Bin | 仓库测试套件；GitHub 问题解决 | 2023-10 | [arXiv:2310.06770](https://arxiv.org/abs/2310.06770) |
+| 9 | SWE-bench Full | 24 × 2,294 | Bin | 仓库测试套件；完整实例集 | 2023-10 | [arXiv:2310.06770](https://arxiv.org/abs/2310.06770) |
+| 10 | CRUXEval | 38 × 800 | Con | 精确匹配；输入/输出预测 | 2024-01 | [arXiv:2401.03065](https://arxiv.org/abs/2401.03065) |
+| 11 | LiveCodeBench | 72 × 1,055 | Con | 单元测试；pass@1，竞赛题目 | 2024-03 | [arXiv:2403.07974](https://arxiv.org/abs/2403.07974) |
+| 12 | BigCodeBench | 153 × 1,140 | Bin | 单元测试；沙盒，139 个库 API | 2024-06 | [arXiv:2406.15877](https://arxiv.org/abs/2406.15877) |
+| 13 | SWE-bench Java | 52 × 170 | Bin | 仓库测试套件；Java 问题 | 2024-08 | [multi-swe-bench](https://github.com/multi-swe-bench) |
+| 14 | SWE-bench Multi | 13 × 301 | Bin | 仓库测试套件；多语言 | 2024-08 | [multi-swe-bench](https://github.com/multi-swe-bench) |
+| 15 | MLE-bench | 30 × 75 | Con | Kaggle 评分；竞赛提交 | 2024-10 | [arXiv:2410.07095](https://arxiv.org/abs/2410.07095) |
+| 16 | DPAI Arena | 9 × 141 | Con | 测试套件 + 评分标准；双重评估 | 2025-01 | [dpaia.dev](https://dpaia.teamcity.com) |
+| 17 | ClineBench | 3 × 12 | Con | Harbor 框架；编码智能体 | 2025-01 | [cline/cline](https://github.com/cline/cline) |
+| 18 | SWE-PolyBench | — × 2,110 | Bin | 仓库测试套件；多语言 SWE | 2025-01 | [arXiv:2501.14798](https://arxiv.org/abs/2501.14798) |
+| 19 | EditBench | 44 × 540 | Con | 单元测试；代码编辑，多语言 | 2025-02 | [waynchi/editbench](https://github.com/waynchi/editbench) |
+
+**工具使用与函数调用**
+
+| # | Benchmark | $N \times M$ | Type | Evaluation Method | Released | Reference |
+|:--|-----------|:---:|:---:|-------------------|:---:|-----------|
+| 20 | BFCL v3 | 93 × 4,751 | Bin | AST 匹配与执行；函数调用验证 | 2024-02 | [arXiv:2402.15671](https://arxiv.org/abs/2402.15671) |
+| 21 | ToolBench | 10 × 765 | Bin | StableToolBench；缓存 API 评估 | 2024-03 | [arXiv:2403.07714](https://arxiv.org/abs/2403.07714) |
+
+**智能体任务**
+
+| # | 基准 | $N \times M$ | 类型 | 评估方法 | 发布日期 | 参考文献 |
+|:--|-----------|:---:|:---:|-------------------|:---:|-----------|
+| 22 | WebArena | 14 × 812 | Bin | 浏览器环境；真实网站 | 2023-07 | [arXiv:2307.13854](https://arxiv.org/abs/2307.13854) |
+| 23 | AgentBench | 29 × 8 | Con | 多环境；操作系统、数据库、网络、游戏 | 2023-08 | [arXiv:2308.03688](https://arxiv.org/abs/2308.03688) |
+| 24 | GAIA | 32 × 165 | Bin | 精确匹配；网络+工具使用 | 2023-11 | [arXiv:2311.12983](https://arxiv.org/abs/2311.12983) |
+| 25 | VisualWebArena | 6 × 910 | Con | 浏览器环境；多模态网页 | 2024-01 | [arXiv:2401.13649](https://arxiv.org/abs/2401.13649) |
+| 26 | WorkArena | 4 × 118 | Con | ServiceNow 环境；企业级 | 2024-03 | [arXiv:2403.07718](https://arxiv.org/abs/2403.07718) |
+| 27 | OSWorld | 77 × 369 | Con | 虚拟机环境；桌面自动化 | 2024-04 | [arXiv:2404.07972](https://arxiv.org/abs/2404.07972) |
+| 28 | AndroidWorld | 3 × 116 | Bin | 模拟器；移动自动化 | 2024-05 | [arXiv:2405.14573](https://arxiv.org/abs/2405.14573) |
+| 29 | AgentDojo | 29 × 132 | Bin | 沙盒；工具使用+安全性 | 2024-06 | [arXiv:2406.13352](https://arxiv.org/abs/2406.13352) |
+| 30 | AgentDojo (Sec.) | 28 × 949 | Bin | 沙盒；攻击成功率 | 2024-06 | [arXiv:2406.13352](https://arxiv.org/abs/2406.13352) |
+| 31 | TAU-bench | 32 × 329 | Con | 模拟环境；客户服务 | 2024-06 | [arXiv:2406.12045](https://arxiv.org/abs/2406.12045) |
+| 32 | AppWorld | 18 × 31 | Con | API 环境；多应用交互 | 2024-07 | [arXiv:2407.18901](https://arxiv.org/abs/2407.18901) |
+| 33 | CORE-Bench | 15 × 270 | Bin | Docker 环境；可复现性 | 2024-09 | [arXiv:2409.11353](https://arxiv.org/abs/2409.11353) |
+| 34 | BrowserGym | 18 × 8 | Con | 浏览器环境；聚合评分 | 2024-12 | [arXiv:2412.05467](https://arxiv.org/abs/2412.05467) |
+| 35 | TheAgentCompany | 19 × 175 | Con | 模拟企业；工作场所 | 2024-12 | [arXiv:2412.14161](https://arxiv.org/abs/2412.14161) |
+| 36 | Terminal-Bench | 128 × 89 | Con | Docker 环境；命令行任务解决 | 2025-02 | [arXiv:2502.10996](https://arxiv.org/abs/2502.10996) |
+| 37 | PaperBench | 9 × 20 | Con | 评分量规；复现机器学习论文 | 2025-02 | [arXiv:2504.01848](https://arxiv.org/abs/2504.01848) |
+
+**安全性、安保与红队测试**
+
+| # | Benchmark | $N \times M$ | Type | Evaluation Method | Released | Reference |
+|:--|-----------|:---:|:---:|-------------------|:---:|-----------|
+| 38 | CyBench | 8 × 40 | Bin | CTF 环境；夺取旗帜 | 2024-08 | [arXiv:2408.08926](https://arxiv.org/abs/2408.08926) |
+| 39 | BBQ | 7 × 58,492 | Bin | 多选题；在11个人口统计类别中检测偏差 | 2022-05 | [nyu-mll/BBQ](https://github.com/nyu-mll/BBQ) |
+| 40 | JailbreakBench | 18 × 100 | Bin | 红队测试；5种攻击方法 × 4个模型 | 2024-01 | [JailbreakBench](https://github.com/JailbreakBench/jailbreakbench) |
+| 41 | BeaverTails | 15 × 33,432 | Bin | 安全标注；14个危害类别 | 2023-07 | [PKU-Alignment/beavertails](https://github.com/PKU-Alignment/beavertails) |
+| 42 | HarmBench | — × 510 | — | 分类器判别；7个危害类别（仅项目） | 2024-02 | [arXiv:2402.04249](https://arxiv.org/abs/2402.04249) |
+| 43 | WMDP | — × 3,668 | — | 多选题；生物安全、网络安全、化学领域（仅项目） | 2024-03 | [wmdp.ai](https://www.wmdp.ai/) |
+| 44 | SafetyBench | — × 11,435 | — | 多选题；7个安全类别（仅项目，答案未公开） | 2024-06 | [thu-coai/SafetyBench](https://github.com/thu-coai/SafetyBench) |
+| 45 | DecodingTrust | — × 243K | — | 8个可信度轴（仅提示） | 2023-06 | [NeurIPS 2023](https://decodingtrust.github.io/) |
+| 46 | TensorTrust | — × 563K | Bin | 提示注入攻击与防御（游戏） | 2024-02 | [qxcv/tensor-trust](https://huggingface.co/datasets/qxcv/tensor-trust) |
+| 47 | LLMail-Inject | 839 × 40 | Bin | 提示注入；40个关卡，多个大语言模型 | 2025-06 | [microsoft/llmail-inject](https://huggingface.co/datasets/microsoft/llmail-inject-challenge) |
+| 48 | Alignment Faking | — × 2.14M | Bin | 强化学习记录；对齐伪装标签 | 2024-12 | [Anthropic/alignment-faking-rl](https://huggingface.co/datasets/Anthropic/alignment-faking-rl) |
+| 49 | AgentHarm | — × 176 | Bin | 多步有害代理任务；11个类别 | 2024-10 | [ai-safety-institute/AgentHarm](https://huggingface.co/datasets/ai-safety-institute/AgentHarm) |
+| 50 | MACHIAVELLI | — × 572K 场景 | Con | 伦理决策；25+种违规类型 | 2023-04 | [aypan17/machiavelli](https://github.com/aypan17/machiavelli) |
+| 51 | BELLS | — × 5 数据集 | Bin | 标注的执行轨迹；越狱、幻觉 | 2024-06 | [CeSIA/BELLS](https://github.com/CentreSecuriteIA/BELLS) |
+| 52 | Scale MRT | — × 6K 轨迹 | Bin | 代理监控规避；撒谎、操纵 | 2025 | [ScaleAI/mrt](https://huggingface.co/datasets/ScaleAI/mrt) |
+
+**特定领域（法律、金融、医疗）**
+
+| # | Benchmark | $N \times M$ | Type | Evaluation Method | Released | Reference |
+|:--|-----------|:---:|:---:|-------------------|:---:|-----------|
+| 53 | MedNLI | — × 14,049 | 二分类 | NLI；来自MIMIC-III的临床句子对 | 2018-08 | @romanov2018mednli |
+| 54 | PubMedQA | — × 1,000 | 二分类 | 多选题；生物医学研究（是/否/可能） | 2019-09 | @jin2019pubmedqa |
+| 55 | IgakuQA | 5 × 1,471 | 二分类 | 多选题；日本医师执照考试（2018--2022） | 2023-03 | [jungokasai/IgakuQA](https://github.com/jungokasai/IgakuQA) |
+| 56 | LawBench | 51 × 9,000 | 二分类 | 精确匹配；20个中文法律任务，零样本 | 2023-09 | [open-compass/LawBench](https://github.com/open-compass/LawBench) |
+| 57 | FinanceBench | 16 × 150 | 二分类 | 专家评分；SEC文件问答 | 2023-11 | [patronus-ai/financebench](https://github.com/patronus-ai/financebench) |
+| 58 | LexEval | 38 × 14,147 | 生成式 | 评分标准；23个中文法律任务（NeurIPS 2024） | 2024-09 | [CSHaitao/LexEval](https://github.com/CSHaitao/LexEval) |
+| 59 | AfriMedQA | 30 × 6,910 | 二分类 | 多选题；泛非医学，20个专业 | 2024-09 | [arXiv:2409.15290](https://arxiv.org/abs/2409.15290) |
+
+**偏好与奖励建模**
+
+| # | Benchmark | $N \times M$ | Type | Evaluation Method | Released | Reference |
+|:--|-----------|:---:|:---:|-------------------|:---:|-----------|
+| 79 | AlpacaEval | 221 × 805 | 二分类 | LLM评判；与GPT-4对比的胜/负 | 2023-05 | [tatsu-lab/alpaca_eval](https://github.com/tatsu-lab/alpaca_eval) |
+| 80 | MT-Bench | — × 80 | — | GPT-4 + 人类成对比较；多轮 | 2023-06 | [lm-sys/FastChat](https://github.com/lm-sys/FastChat) |
+| 81 | UltraFeedback | 17 × 63,966 | 生成式 | GPT-4评判；总体评分（1--10） | 2023-10 | [OpenBMB/UltraFeedback](https://github.com/OpenBMB/UltraFeedback) |
+| 82 | RewardBench | 149 × 2,985 | 二分类 | 分数比较；选中 vs 拒绝 | 2024-03 | [arXiv:2403.13787](https://arxiv.org/abs/2403.13787) |
+| 83 | WildBench | 63 × 1,024 | 生成式 | LLM评判；检查表评分 | 2024-06 | [arXiv:2406.04770](https://arxiv.org/abs/2406.04770) |
+
+**多语言与文化评估**
+
+| # | 基准测试 | $N \times M$ | 类型 | 评估方法 | 发布日期 | 参考文献 |
+|:--|-----------|:---:|:---:|-------------------|:---:|-----------|
+| 84 | MasakhaNER v2 | — × — | Bin | NER; 20种非洲语言 | 2022-10 | [arXiv:2210.12391](https://arxiv.org/abs/2210.12391) |
+| 78 | HELM African | — × — | Con | HELM测试框架；非洲语言任务 | 2022-11 | [HELM](https://crfm.stanford.edu/helm/) |
+| 79 | HELM CLEVA | — × — | Con | HELM测试框架；中文评估 | 2022-11 | [HELM](https://crfm.stanford.edu/helm/) |
+| 80 | HELM ThaiExam | — × — | Con | HELM测试框架；泰语考试任务 | 2022-11 | [HELM](https://crfm.stanford.edu/helm/) |
+| 81 | C-Eval | — × 12,342 | Bin | 多项选择题；中国教育体系 | 2023-05 | [arXiv:2305.08322](https://arxiv.org/abs/2305.08322) |
+| 82 | CMMLU | — × 11,582 | Bin | 多项选择题；中文67个学科 | 2023-06 | [arXiv:2306.09212](https://arxiv.org/abs/2306.09212) |
+| 83 | Rakuda | 141 × 40 | Con | LLM评判；日语开放式问答 | 2023-06 | [shisa-ai/shaberi](https://github.com/shisa-ai/shaberi) |
+| 84 | SIB-200 | 2 × 41,820 | Bin | 分类；205种语言 | 2023-09 | [arXiv:2309.07445](https://arxiv.org/abs/2309.07445) |
+| 78 | OALL Arabic MMLU | — × — | Bin | 多项选择题；母语阿语知识题 | 2024-02 | [OALL](https://huggingface.co/blog/leaderboard-arabic-v2) |
+| 79 | OALL Arabic Exams | — × — | Bin | 多项选择题；阿语考试题 | 2024-02 | [OALL](https://huggingface.co/blog/leaderboard-arabic-v2) |
+| 80 | KMMLU | — × 35,030 | Bin | 多项选择题；韩语考试 | 2024-02 | [arXiv:2402.11548](https://arxiv.org/abs/2402.11548) |
+| 81 | Tengu-Bench | 141 × 120 | Con | LLM评判；日语多类别 | 2024-04 | [shisa-ai/shaberi](https://github.com/shisa-ai/shaberi) |
+| 82 | AfriEval | — × 469,210 | Bin | 多项选择题 + 自然语言推理 + 问答；非洲语言 | 2024 | HuggingFace |
+| 83 | AsiaEval | — × 398,263 | Bin | 多项选择题 + 自然语言推理；亚洲语言 | 2024 | HuggingFace |
+| 84 | CulturalEval | — × 82,996 | Bin | 多项选择题；跨文化价值观 | 2024 | HuggingFace |
+| 78 | IberBench | — × 32,797 | Bin | 多项选择题 + 自然语言推理；伊比利亚语言 | 2024 | HuggingFace |
+| 79 | Bridging Gap | 1,767 × 36 | Bin | 多项选择题；Winogrande × 12种语言 | 2024 | HuggingFace |
+| 80 | Ko Leaderboard | 1,159 × 9 | Con | lm-eval-harness框架；韩语任务 | 2024 | [Open Ko-LLM](https://huggingface.co/spaces/upstage/open-ko-llm-leaderboard) |
+| 81 | La Leaderboard | 69 × 108 | Con | lm-eval-harness框架；伊比利亚任务 | 2024 | HuggingFace |
+| 82 | PT Leaderboard | 1,148 × 10 | Con | lm-eval-harness框架；葡萄牙语 | 2024 | HuggingFace |
+| 83 | Thai Leaderboard | 72 × 19 | Con | lm-eval-harness框架；泰语任务 | 2024 | HuggingFace |
+| 84 | TUMLU | 30 × 7,486 | Bin | 多项选择题；9种突厥语族语言，CoT + non-CoT | 2024-12 | [ceferisbarov/TUMLU](https://github.com/ceferisbarov/TUMLU) |
+
+**图例。** $N$ = 模型/智能体；$M$ = 项目/任务；"—" = 仅项目数据。**类型**：Bin = 二值型；Con = 连续型 $[0,1]$。**发布时间**：最早公开可用时间（arXiv、GitHub 或 HuggingFace）。**评估方法**：MCQ = 多选题精确匹配；单元测试 = 代码执行；LLM 评判 = 自动偏好判断；环境 = 交互式环境。
+
+**评分变体。** 上述84个条目对应于HuggingFace上 (`aims-foundation/torch-measure-data`) 的120个数据集变体。许多基准发布时带有多种**评分条件**，这些条件从相同的项目生成不同的响应矩阵——这一度量选择会影响下游分析。例如：
+
+| Benchmark | 变体数 | 评分条件 |
+|-----------|:---:|-----|
+| CRUXEval | 6 | 连续型/二值型 × 组合/仅输入/仅输出 |
+| TAU-bench | 6 | 组合 + 5个领域划分（航空 v1/v2、HAL、零售、电信） |
+| EvalPlus | 5 | 组合 + HumanEval / MBPP × 基础/增强测试套件 |
+| BigCodeBench | 4 | 完整/指令 × 全集/困难子集 |
+| DPAI Arena | 4 | 总分/盲评/知情评分 + 二值阈值 |
+| MLE-bench | 4 | 连续型/二值型/中位数以上/原始Kaggle分数 |
+| CyBench | 3 | 无引导/子任务引导/子任务完成分数 |
+| SWE-PolyBench | 2 | 完整（1个模型）/ 已验证（3个模型） |
+| 13个其他基准 | 各2个 | 相同项目的二值与连续型重新评分 |
+
+这些变体代表了 @sec-reliability 意义上的不同*测试条件*：相同的项目在不同的评分准则、提示格式或子集选择下实施。模型被测得的能力可能在不同条件之间发生显著变化——对于同一模型在相同项目上，BigCodeBench的“instruct”分数与“complete”分数不同，因为提示格式改变了被测量的能力类型。这就是为什么概化理论（@sec-reliability）会分解条件间的方差：评分条件是测量的一个侧面，而不仅仅是一个数据处理选择。
+:::
+
+
+### 可视化评测格局 {#sec-landscape-viz}
+
+为了快速了解评测格局的结构，我们使用句子转换器嵌入19个基准的项目文本，然后用UMAP将基准质心投影到二维空间。每个点代表一个基准，根据其项目的语义内容定位。
+
+{{< include _plt_setup.qmd >}}
+
+```{pyodide-python}
+#| label: landscape-scatter
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Pre-computed UMAP coordinates (sentence-transformer embeddings of sampled items)
+data = {"x": [9.83, 10.16, 10.43, 8.61, 8.97, 8.29, 9.37, 8.64, 8.7, 10.74, 11.07, 10.46, 7.17, 7.24, 6.42, 6.6, 9.24, 11.09, 11.24], "y": [4.02, 3.49, 4.35, 2.86, 2.23, 2.27, 1.11, 1.55, 0.85, 6.12, 5.26, 5.53, 9.26, 8.68, 9.42, 8.89, 0.36, 3.78, 4.64], "category": ["Knowledge", "Knowledge", "Knowledge", "Knowledge (Chinese)", "Knowledge (Chinese)", "Knowledge (Korean)", "Knowledge (African)", "Knowledge (Asian)", "Knowledge (Iberian)", "Code Generation", "Code Generation", "Code Reasoning", "Software Engineering", "Software Engineering", "Software Engineering", "Software Engineering", "Software Engineering", "ML Engineering", "Tool Use"], "benchmark": ["MMLU-Pro", "HLE", "LiveBench", "C-Eval", "CMMLU", "KMMLU", "AfriEval", "AsiaEval", "IberBench", "BigCodeBench", "EvalPlus", "CRUXEval", "SWE-bench", "SWE-bench Full", "SWE-bench Java", "SWE-bench ML", "SWE-PolyBench", "MLE-bench", "BFCL"]}
+
+# Color map by coarse category
+cat_colors = {
+    "Knowledge": "#5B8DEE",
+    "Knowledge (Chinese)": "#45BF7C",
+    "Knowledge (Korean)": "#45BF7C",
+    "Knowledge (African)": "#B07CD8",
+    "Knowledge (Asian)": "#B07CD8",
+    "Knowledge (Iberian)": "#B07CD8",
+    "Code Generation": "#F0A35C",
+    "Code Reasoning": "#F0A35C",
+    "Software Engineering": "#E8637A",
+    "ML Engineering": "#F0A35C",
+    "Tool Use": "#888888",
+}
+# Coarse legend labels
+coarse_map = {
+    "Knowledge": "Knowledge (English)",
+    "Knowledge (Chinese)": "Knowledge (CJK)",
+    "Knowledge (Korean)": "Knowledge (CJK)",
+    "Knowledge (African)": "Knowledge (Other Lang)",
+    "Knowledge (Asian)": "Knowledge (Other Lang)",
+    "Knowledge (Iberian)": "Knowledge (Other Lang)",
+    "Code Generation": "Code",
+    "Code Reasoning": "Code",
+    "Software Engineering": "Software Engineering",
+    "ML Engineering": "Code",
+    "Tool Use": "Tool Use",
+}
+
+fig, ax = plt.subplots(figsize=(6, 4))
+
+# Plot points
+for i in range(len(data["x"])):
+    cat = data["category"][i]
+    ax.scatter(data["x"][i], data["y"][i], c=cat_colors[cat], s=60,
+               edgecolors="white", linewidths=0.5, zorder=3)
+    # Label
+    offset = (5, 5)
+    if data["benchmark"][i] in ("SWE-bench Full", "SWE-bench Java"):
+        offset = (5, -10)
+    elif data["benchmark"][i] == "CMMLU":
+        offset = (-35, -12)
+    elif data["benchmark"][i] == "EvalPlus":
+        offset = (5, -10)
+    ax.annotate(data["benchmark"][i], (data["x"][i], data["y"][i]),
+                fontsize=5.5, xytext=offset, textcoords="offset points",
+                color="#333333")
+
+# Legend (coarse categories)
+from matplotlib.lines import Line2D
+legend_items = {
+    "Knowledge (English)": "#5B8DEE",
+    "Knowledge (CJK)": "#45BF7C",
+    "Knowledge (Other Lang)": "#B07CD8",
+    "Code": "#F0A35C",
+    "Software Engineering": "#E8637A",
+    "Tool Use": "#888888",
+}
+handles = [Line2D([0], [0], marker='o', color='w', markerfacecolor=c,
+                  markersize=6, label=l) for l, c in legend_items.items()]
+ax.legend(handles=handles, loc="lower left", framealpha=0.9)
+
+ax.set_xlabel("UMAP 1")
+ax.set_ylabel("UMAP 2")
+ax.set_title("AI Evaluation Landscape (benchmark centroids)")
+ax.grid(True, alpha=0.2)
+plt.tight_layout()
+plt.show()
+
+print("19 benchmarks from torch_measure, embedded with all-MiniLM-L6-v2, projected with UMAP.")
+print("Knowledge benchmarks (blue/green/purple) cluster by language family.")
+print("Code benchmarks (orange) form a distinct region.")
+print("SWE-bench variants (red) cluster tightly — similar issue descriptions across languages.")
+```
+
+散点图揭示了评估格局的几个结构性特征。**知识基准测试**形成了一个广泛的簇，英语基准测试（MMLU-Pro [@wang2024mmlupro]，HLE [@phan2026hle]，LiveBench [@white2025livebench]）聚集在一起，多语言基准测试（C-Eval [@huang2023ceval]，CMMLU [@li2023cmmlu]，KMMLU [@son2024kmmlu]，AfriEval，IberBench [@gonzález2025iberbench]）则沿着语言轴展开。**代码基准测试**（BigCodeBench [@zhuo2025bigcodebench]，EvalPlus [@liu2023evalplus]，CRUXEval [@gu2024cruxeval]）占据了一个独特的区域，反映了自然语言问题与编程任务之间的语义差异。**软件工程基准测试**（SWE-bench [@jimenez2023swe] 及其变体）紧密地聚在一起，因为它们的条目都是GitHub问题描述，无论编程语言如何，都具有独特的技术语域。簇之间的分离表明，这些基准测试类别测量的是真正不同的构念——我们可以利用 @sec-foundations 中的因子模型正式检验这一假设。
+
+
+## 多语言与文化评估 {#sec-multilingual}
+
+当前评估格局的一个显著特点是，人们正努力将测量范围扩展到英语和西方文化语境之外。这既给测量科学带来了机遇，也带来了挑战。
+
+### 区域性排行榜与基准测试
+
+多项评估工作针对特定的语言和文化社群：
+
+| 基准测试 | 焦点 | 覆盖范围 |
+|-----------|-------|----------|
+| C-Eval [@huang2023ceval], CMMLU [@li2023cmmlu] | 中文语言与文化 | 普通话，中国教育体系 |
+| KMMLU | 韩语语言与知识 | 韩国教育与职业领域 |
+| Thai Leaderboard | 泰语评估 | 泰语相关任务 |
+| IberBench | 伊比利亚语言 | 西班牙语、葡萄牙语、加泰罗尼亚语及相关语言 |
+| AfriEval | 非洲语言 | 多种非洲语言及其文化语境 |
+| AfriMedQA | 非洲医疗保健 | 非洲医疗保健语境下的医学问答 |
+| AsiaEval | 亚洲语言与文化 | 跨亚洲评估 |
+| CulturalEval | 文化知识 | 跨文化知识与价值观 |
+| SIB-200 | 大规模多语言 | 200多种语言，主题分类 |
+| HELM Multilingual | 多语言模型评估 | 标准化的多语言评估 |
+
+这些基准测试揭示了一个根本性的效度问题：“推理能力”——或我们测量的任何其他构念——在不同语言和文化中是否具有相同的含义？一个在英语推理上表现出色的模型，可能在韩语上表现不佳，并非因为它缺乏推理能力，而是因为题目中嵌入了文化知识（如韩国历史、法律体系、社会规范），这些对于非韩国受众而言是构念无关的，但对于韩国用户来说却是构念相关的。
+
+在测量理论术语中，这是一个文化层面的**题目功能差异（DIF）**问题。在一种文化背景下“公平”的题目，在另一种文化中可能系统性地更难或更易，这并非由于能力差异，而是由于与构念无关的文化负荷。第 @sec-validity 节中开发的 DIF 分析工具可直接应用。
+
+### 多语言软件工程
+
+多语言维度超越了纯语言任务。SWE-bench Multilingual [@jimenez2023swe] 和 SWE-bench Java [@zan2024swebenchjava] 在 Python 以外的语言中测试软件工程能力，揭示出仅用 Python 基准测量的“编码能力”可能无法迁移。SWE-PolyBench [@rashid2025swepolybench] 可同时测试多种编程语言。这些基准为研究编码能力的维度性提供了天然的实验设置：是否存在单一“软件工程”构念，还是 Python 能力、Java 能力与 JavaScript 能力分别是部分独立的维度？
+
+
+## 偏好数据与成对比较 {#sec-preference-data}
+
+相当一部分 AI 评估数据并非来自逐项评分，而是源于**成对比较**：人类或自动化裁判比较两个模型的输出并选出胜者。Chatbot Arena（超过 14 万次比较）[@chiang2024chatbotarena]、AlpacaEval [@li2023alpacaeval]、MT-Bench [@zheng2023judging]、Arena Hard [@li2024arenahard]、WildBench [@lin2024wildbench] 以及偏好数据集（HH-RLHF [@bai2022hhrlhf]、UltraFeedback [@cui2024ultrafeedback]、HelpSteer2 [@wang2024helpsteer2]、Nectar [@zhu2023nectar]、SHP-2 [@askell2021shp2]）均产生比较数据。
+
+### 从比较到响应矩阵
+
+成对比较数据具有与标准响应矩阵不同的结构。我们观察到的不是“模型 $i$ 在题目 $j$ 上的表现”，而是“在提示 $k$ 上模型 $A$ 优于模型 $B$”。自然的数据结构是一个**比较张量** $C_{ABk} \in \{A, B, \text{tie}\}$。
+
+Bradley-Terry 模型 [@bradley1952rank; @sec-paired-comparison] 将这种结构与响应矩阵框架联系起来。在 Bradley-Terry 模型中，模型 $A$ 优于模型 $B$ 的概率为：
+
+$$
+P(A \succ B) = \frac{\exp(\theta_A)}{\exp(\theta_A) + \exp(\theta_B)} = \sigma(\theta_A - \theta_B)
+$$
+
+这在形式上等价于一个 Rasch 模型，其中“被试”是比较对 $(A, B)$，“题目难度”为 $\theta_B$，“能力”为 $\theta_A$。Elo 评分系统实现了该模型的在线最大似然估计。
+
+### 奖励模型基准
+
+RewardBench [@lambert2024rewardbench] 和 RewardBench 2 [@malik2025rewardbench2] 评估了 *奖励模型*——即在 RLHF 流程中为输出打分的模型。这里的“subject”是一个奖励模型，而“item”是一个（提示，选中回复，被拒绝回复）三元组。响应是二元的：奖励模型是否为选中回复分配了更高的分数？这是一个标准的响应矩阵，但项目具有丰富的内部结构（每个项目有两个全文回复），而简单的 IRT 模型无法捕捉这一点。
+
+Preference Dissection [@li2024dissecting] 和 BigGen [@kim2025biggenbench] 则更进一步，将偏好判断分解为多个标准（有用性、安全性、连贯性、创造性），生成了适用于多维测量模型的多特质响应数据。
+
+
+## 配对响应矩阵 {#sec-paired-response-matrix}
+
+上述响应矩阵每个基准都有一个矩阵。但是，越来越多的 AI 评估产生了 *配对* 矩阵：同一（或可比的）被试在多种条件下对项目做出响应——通常是在有 AI 辅助和无 AI 辅助的情况下。部署随机对照试验（RCT）、提升研究和人机协作实验都产生了这种结构。
+
+### 配对响应矩阵
+
+这些研究共享一种通用数据结构，该结构通过处理维度扩展了响应矩阵。标准的响应矩阵记录：
+
+$$
+Y_{ij} \in \{0, 1\} \quad \text{(subject } i \text{ on item } j\text{)}
+$$
+
+**配对响应矩阵** 则记录：
+
+$$
+Y_{ij}^{(t)} \in \{0, 1\} \quad \text{(subject } i \text{ on item } j \text{ under condition } t\text{)}
+$$
+
+其中 $t \in \{\text{control}, \text{treatment}\}$（或多个处理组）。这里的被试现在是 *人*——放射科医生、开发人员、学生——而测量目标是 AI 对人类表现产生的 **因果效应**，而非孤立地衡量 AI 系统的能力。
+
+这种结构自然地与多面测量模型相连接。在多面 Rasch 框架中，处理条件只是除个人能力和项目难度之外的另一个面：
+
+$$
+\log \frac{P(Y_{ij}^{(t)} = 1)}{P(Y_{ij}^{(t)} = 0)} = \theta_i - \beta_j + \tau_t
+$$
+
+其中 $\tau_t$ 是处理效应面。交互项 $\theta_i \times \tau_t$ 捕捉了 *异质性处理效应*——即 AI 辅助对某些人的帮助大于其他人的程度。
+
+### 配对响应矩阵清单 {#sec-paired-inventory}
+
+我们整理了五个公开可用的干预数据集，涵盖医学、软件工程、分类和教育领域。这些是 `torch_measure` 集合中首批被试是人类而非 AI 系统的数据集。
+
+::: {.callout-note collapse="true"}
+## 配对响应矩阵清单
+
+| 数据集 | 领域 | 受试者 | 项目 | AI 系统 | 条件 | 结果指标 | 来源 |
+|---------|--------|----------|-------|-----------|------------|---------|--------|
+| Collab-CXR | 放射学 | 336 名放射科医生 | 324 个胸部X光病例 | CheXpert (DenseNet121) | 4 种（仅图像，+病史，+AI，+AI+病史） | 诊断概率 | [OSF](https://osf.io/z7apq/) |
+| METR Early-2025 | 编程 | 16 名开发者 | 246 个问题 | Cursor Pro + Claude 3.5/3.7 Sonnet | {允许AI, 禁止AI} | 完成时间（分钟） | [GitHub](https://github.com/METR/Measuring-Early-2025-AI-on-Exp-OSS-Devs) |
+| METR Late-2025 | 编程 | 57 名开发者 | 1,134 个问题 | Cursor Pro + Claude 3.5/3.7 Sonnet | {允许AI, 禁止AI} | 完成时间（分钟） | [GitHub](https://github.com/METR/Measuring-Late-2025-AI-on-OSS-Devs) |
+| HAIID | 分类 | 1,125 名参与者 | 152 个项目（5个领域） | 训练好的分类器（每个领域） | 建议前/后 × {AI标签, 人类标签} | 二值正确性 | [GitHub](https://github.com/kailas-v/human-ai-interactions) |
+| GenAI Learning | 教育（数学） | 943 名学生 | 57 道练习 + 48 道考试 | GPT-4（原始版 + 有防护栏的辅导版） | {对照组, 原始GPT, 增强GPT} | 二值分数 | [GitHub](https://github.com/obastani/GenAICanHarmLearning) |
+:::
+
+**Collab-CXR** [@yu2024collabcxr] 是最大最干净的数据集。227 名放射科医生每人阅读 324 个胸部X光病例的一个子集，在四种条件下（有/无 AI 预测，有/无临床病史），为每个病例的 104 种病理提供概率评估。AI 系统是 **CheXpert**，一个在 224,316 张胸片上训练的 DenseNet121 CNN，输出每种病理的概率预测；其 AUROC 性能优于大约三分之二的参与放射科医生。被试内交叉设计使其非常适合于多面分析。AI 辅助将平均诊断准确率从 96.5% 提高到 97.1%，但效果在放射科医生和病理之间具有异质性。
+
+**METR 开发者生产力** [@becker2025metr] 是一项被试内随机对照试验，每个开发者的问题被随机分配到允许 AI 或禁止 AI 的条件下。AI 工具是 **Cursor Pro** 搭配 **Claude 3.5/3.7 Sonnet**——研究时最先进的 AI 编程助手。早期研究（16 名开发者，246 个任务）发现允许 AI 的任务花费的时间 *更长*（119.5 对比 90.9 分钟）——一个由上下文切换成本和 AI 引发的范围扩大导致的违反直觉的结果。后期研究（57 名开发者，1,134 个任务）发现了更小且反转的效果（151 对比 169 分钟），尽管存在严重的筛选效应。对于 IRT 分析的一个关键限制：项目是开发者特定的（不在受试者间共享），产生块对角矩阵。
+
+
+**HAIID** [@vodrahalli2022haiid] 测量了将建议标记为“来自 AI”还是“来自人类”是否会改变人们对其的使用方式。这些 AI 系统是针对每个领域的**训练好的分类器**（艺术风格、城市人口、讽刺检测、人口普查收入、皮肤病学）。在五个分类领域中，标签的影响微乎其微：标记为 AI 的建议将准确率提高了 +5--9%，而标记为人类的建议几乎提升了相同的幅度。起决定作用的是建议的*内容*，而非其来源。
+
+![来自 HAIID 艺术分类领域的配对响应矩阵。每个面板展示不同条件下一个参与者 $\times$ 项目的响应矩阵（绿色 = 正确，红色 = 不正确）。**左：** 建议前的响应（558 名参与者 $\times$ 32 个项目，平均准确率 0.658）。**中：** 建议被标记为“来自 AI”时的建议后响应（278 名参与者，准确率 0.746）。**右：** 建议被标记为“来自人类”时的建议后响应（280 名参与者，准确率 0.735）。中间和右侧面板中几乎相同的绿色单元格密度表明，建议来源标签对人类行为的影响微乎其微。](Figures/intervention/haiid_art_heatmap.png){#fig-haiid-matrix width="95%"}
+
+**GenAI Learning** [@bastani2025genai] 展示了一个测量悖论。AI 系统是 **GPT-4**，有两种配置：一个普通 ChatGPT 界面和一个带有防护措施的、以教学为目的设计的导师系统，该系统鼓励逐步推理而不是直接给出答案。使用 ChatGPT 练习数学的学生在练习期间得分大幅提高（0.69 对比对照组的 0.34），但在随后的无 AI 考试中得分*并没有更好*（0.36 对比 0.36）。使用带有防护措施的 GPT 导师的学生在考试中同样未能超越对照组（0.35）。AI 虚增了表面表现，却没有带来持久的学习效果——这一发现对任何只衡量人机团队而不分离人类贡献的评估都具有启示意义。
+
+![来自 GenAI Learning 研究练习阶段的配对响应矩阵。每个面板展示不同处理组下一个学生 $\times$ 问题的响应矩阵（绿色 = 正确，红色 = 不正确）。**左：** 对照组（349 名学生，均值 0.335）。**中：** 带有教学防护措施的 GPT 导师（312 名学生，均值 0.692）。**右：** 普通 GPT 基础版（282 名学生，均值 0.468）。GPT 导师面板中显著更高的绿色单元格密度反映了练习期间被 AI 虚增的表现。](Figures/intervention/genai_practice_heatmap.png){#fig-genai-practice width="95%"}
+
+![同一门后续考试中，三个相同治疗组的表现——考试在没有AI辅助的情况下进行。**左：**对照组（均值0.362）。**中：**GPT Tutor组（均值0.357）。**右：**GPT Base组（均值0.293）。对照组与GPT Tutor组在视觉上的相似性——以及GPT Base组红色部分的增加——表明AI所膨胀的练习表现并未转化为持久的学习效果。](Figures/intervention/genai_exam_heatmap.png){#fig-genai-exam width="95%"}
+
+### 配对反应矩阵所能实现的
+
+干预矩阵开启了标准基准测试所无法解决的一系列测量问题：
+
+1. **异质性处理效应。**AI对所有用户的帮助是否相同，还是会更有利于专家、新手或特定亚群体？多面Rasch模型和DIF分析（@sec-dif-theory）可以根据个人特征分解处理效应。
+
+2. **人类-AI团队的测量效度。**如果一个人类-AI团队在任务上得分为90%，人类的贡献有多大？GenAI学习的结果表明，这并不是一项简单的分解——表面上的团队表现可能完全归功于AI，而人类却毫无收获。
+
+3. **将部署前与部署后联系起来。**安全基准测试衡量的是AI在孤立状态下的能力；配对反应矩阵则衡量当人类与这些能力互动时会发生什么。两者之间的关系是*生态效度*的经验性问题——而且几乎未被研究过。
+
+4. **跨安全框架的心理测量链接。**不同AI实验室使用互不兼容的安全评估框架（Anthropic的ASL等级、OpenAI的Preparedness阈值、DeepMind的Critical Capability Levels）。IRT链接方法可以将它们置于一个共同的尺度上，但这只有提升研究中的题目级数据变得可用时才能实现。目前，还没有CBRN提升研究发布题目级数据。
+
+
+## 全景图中的空白 {#sec-landscape-gaps}
+
+上述基准测试清单已然详尽，但更广阔的全景要丰富得多。理解我们当前收藏之外存在什么——以及真正缺失什么——有助于识别出策展机会和真正的盲点。
+
+### 领域覆盖
+
+`torch_measure`集合现已跨越多个专门领域，超越了通用知识和编程。在每个领域中，我们都记录了哪些已策展、哪些存在但尚未策展，以及哪些是真正的空白。
+
+**法律领域。** LawBench（51个模型 × 9,000个中文法律条目）[@fei2023lawbench]现已整理完毕，包含完整的每个问题每个模型的预测结果。LegalBench（162项英文法律推理任务，12K+个条目）[@guha2023legalbench]、LEXTREME（24种欧洲语言）[@niklaus2023lextreme]以及CaseHOLD（53K个美国判例法条目）[@zheng2021casehold]提供了公开问题数据集，但缺少跨模型预测矩阵。法律领域的评估具有独特的测量挑战：管辖权依赖性、可辩护的替代答案，以及涵盖法定解释、案例分析和程序知识在内的多面性构念。
+
+**金融领域。** FinanceBench（16个模型配置 × 150个SEC申报问题）[@islam2023financebench]现已整理完毕。FinBen/PIXIU [@xie2024finben; @xie2023pixiu]使用`lm-evaluation-harness`框架涵盖了24项任务中的36个数据集。FinQA（8,281个数值推理问题）[@chen2022finqa]、ConvFinQA（多轮金融问答）[@chen2022convfinqa]和TAT-QA（混合表格与文本问答）[@zhu2021tatqa]提供了公开数据集，但缺少跨模型预测数据。
+
+**医疗保健领域。** AfriMedQA（泛非洲，30个模型 × 6,910个条目）[@nimo2025afrimedqa]现已整理完毕。MedQA（12,723个USMLE风格问题）[@jin2020medqa]、MedMCQA（194K个印度医学考试问题）[@pal2022medmcqa]、PubMedQA [1,000个专家标注的生物医学研究问题；@jin2019pubmedqa]以及MedNLI [14K个源自MIMIC-III的临床自然语言推理配对；@romanov2018mednli]均提供了公开问题数据集。多语言医学基准包括CMB/CMExam（中文）[@wang2024cmb; @liu2023cmexam]、KorMedMCQA（韩语）[@kweon2024kormedmcqa]、JMedBench/IgakuQA（日语）[@jiang2025jmedbench; @kasai2023igakuqa]、MedExpQA（4种语言）[@alonso2024medexpqa]和IMB（意大利语，25K+个条目）[@romano2025imb]。主要障碍在于，大多数排行榜仅发布总体准确率，而非每个模型每个条目的响应矩阵。
+
+**偏好与奖励建模。** RewardBench（149个奖励模型 × 2,985个条目）[@lambert2024rewardbench]、UltraFeedback（17个模型 × 64K个提示）[@cui2024ultrafeedback]、AlpacaEval [@li2023alpacaeval]和WildBench [@lin2024wildbench]均已整理完毕。MT-Bench（80个问题）[@zheng2023judging]提供了条目内容，但仅有成对的人类判断，而非每个模型的绝对分数。Chatbot Arena（33K个对话，具有成对偏好）[@chiang2024chatbotarena]在HuggingFace上可用于成对分析。
+
+**视觉-语言与多模态。** HuggingFace 上的 OpenVLMRecords 数据集提供了 220 多个视觉-语言模型在 80 多个基准（MMBench [@liu2024mmbench]、SEED-Bench [@li2024seedbench]、MME [@fu2023mme]、POPE [@li2023pope]、MM-Vet [@yu2024mmvet]、MMMU [@yue2024mmmu]、MathVista [@lu2024mathvista]、Video-MME [@fu2025videomme] 等）上每个问题的原始模型回答。这实际上是一个庞大的多模态评估响应矩阵集合，可直接用于 IRT 分析。`lmms-eval` 框架 [@zhang2024lmmseval] 生成的逐项预测也可以采用类似方式整理。我们集合中多模态覆盖有限（仅有 VisualWebArena [@koh2024visualwebarena]）是整理上的缺口，而非数据可用性的缺口。
+
+### 缺失的语言与文化
+
+多语言基准的生态远比我们当前集合所覆盖的更为丰富：
+
+| 地区 | 在我们的集合中 | 可获得的逐项数据（尚未整理） | 仅有问题（无逐模型预测） |
+|--------|------------------|------------------------------------------|------------------------------------------|
+| 东亚 | C-Eval、CMMLU、KMMLU、Thai LB、HELM CLEVA/ThaiExam | Rakuda（约 557 个模型）、Tengu-Bench（约 558 个模型）、IgakuQA（5 个模型）— 通过 [Shaberi](https://github.com/shisa-ai/shaberi) 可获取 | JGLUE、JMMLU（7,536 道选择题） |
+| 非洲 | AfriEval、AfriMedQA、HELM African、MasakhaNER v2、Bridging the Gap、SIB-200 | — | —（覆盖良好） |
+| 中东 | OALL Arabic Exams、OALL Arabic MMLU | — | AlGhafa（22,977）、ACVA、ORCA |
+| 南亚 | 通过 SIB-200、AsiaEval 部分覆盖 | — | MILU（79,617 道选择题，11 种印度语言，需申请） |
+| 突厥语族 | — | TUMLU（14 个模型 × 38K 条 × 9 种语言，完整 JSON） | TurkishMMLU（10K） |
+| 东欧 | — | — | MERA（19,739 条俄语，提交数据不公开）、Russian SuperGLUE（101K，不公开）、LLMzSzL（19K 波兰语）、ZNO（3,814 乌克兰语） |
+| 拉丁美洲 | IberBench、PT LB、La LB | — | —（主要为分类任务） |
+| 原住民语言 | — | — | AmericasNLI（10 种语言，14K 条自然语言推理项目） |
+
+三种模式浮现出来。第一，若干包含逐项逐模型数据的基准已经存在，但尚未整理纳入我们的集合：**TUMLU** [@isbarov2025tumlu]（9 种突厥语，14 个模型，包含问题与逐项模型输出的结构化 JSON）、**Rakuda** [@passaglia2023rakuda] 和 **Tengu-Bench** [@lightblue2024tengu]（日语，约 558 个模型，通过 Shaberi 框架获取），以及 **IgakuQA** [@kasai2023igakuqa]（日语医学，5 个基线）。这些可以立即开始整理。
+
+第二，许多基准测试发布了题目，但未发布模型预测。JMMLU [@yin2024jmmlu]（日语）、MILU [@verma2024milu]（11种印度语言）、TurkishMMLU [@yuksel2024turkishmmlu]、LLMzSzL [@jassem2025llmzszl]（波兰语）和ZNO [@syromiatnikov2024zno]（乌克兰语）都提供了公开的题目集，但需要重新通过 `lm-evaluation-harness` 运行模型并使用 `--log_samples` 参数，才能生成逐题响应矩阵。某些排行榜（MERA [@fenogenova2024mera]、Russian SuperGLUE [@shavrina2020russiansuperglue]）会收集逐题提交结果，但未公开。
+
+第三，*文化效度* 仍然是更深层的问题。大多数多语言基准测试都是对以英语为中心构念的翻译。基于本土文化的基准测试——围绕本地教育体系、专业标准和文化知识设计——仍然稀缺。KMMLU [@son2024kmmlu]（韩语）、ArabicMMLU [@koto2024arabicmmlu]（源自区域性考试的本土阿拉伯语题目）、LawBench [@fei2023lawbench]（中国法律体系）和TUMLU [@isbarov2025tumlu]（突厥文化知识）是正面的例子；而翻译版的MMLU变体则不是。
+
+### 结构性缺口
+
+有些评估挑战确实未被充分服务，而不仅仅是缺乏整理。
+
+**长周期与多会话评估。** 目前的基准测试在孤立任务上评估模型。尽管这是编程助手和企业智能体的主要使用场景，但没有任何基准测试评估模型在数小时或数天内的持续表现。响应矩阵的构建假设题目是独立的；长周期评估会引入时间依赖性，违背了这一假设。
+
+**教育作为一个领域（而非仅仅作为试题来源）。** 虽然许多基准测试使用教育考试题目作为*测试项*（MMLU [@hendrycks2021measuring]、C-Eval [@huang2023ceval]、KMMLU [@son2024kmmlu]），但很少评估AI在*教育场景*中的表现。MathTutorBench [@macina2025mathtutorbench]、TutorBench [@srinivasa2025tutorbench]和MRBench [@maurya2025mrbench]是新兴的尝试，但规模较小（低于200组对话），且侧重于教学质量评分而非简单的二元正确性判断。评估辅导效果、自适应解释质量或长期学习成果需要纵向、交互式的设计，这不适合标准的响应矩阵格式。
+
+**具身AI与机器人学。** 尽管在基于仿真的机器人基准测试（BEHAVIOR-100 [@srivastava2022behavior]、RLBench [@james2020rlbench]、Meta-World [@yu2020metaworld]）方面已有大量工作，但没有任何一个提供了本书所使用的跨模型响应矩阵。机器人学中的“题目”（任务规范 + 环境配置）和“响应”（轨迹成功/失败）原则上可以形式化为响应矩阵，但尚未大规模实现。
+
+**审计与合规评估。** AI审计正成为越来越重要的评估模式，其驱动力来自法规要求（EU AI Act、NIST AI RMF、ISO/IEC 42001），但它很大程度上在响应矩阵框架之外运作。审计是根据一套*标准*评估一个*系统*，这在结构上就是一个响应矩阵（系统 × 标准 → 通过/未通过），但现有的审计数据是定性的且未标准化。Responsible AI Measures Dataset [@rismani2025rai] 编目了从257篇计算论文中提取的11项伦理原则（公平性、透明度、隐私、信任等）下的791项评估措施——实质上是一个未来标准化审计工具的项目库。AI Safety Index [@fli2025aisafetyindex]（生命未来研究所，2025年冬季）提供了最接近审计响应矩阵的成果：8家前沿AI公司在6个安全领域（风险评估、当前危害、安全框架、生存性安全、治理、信息共享）以GPA量表进行评分。没有公司得分超过C+；“生存性安全”几乎是普遍的F。这些都是小规模的试点努力，但它们指明了路径：如果审计标准得以标准化并系统地应用于各个系统，那么心理测量工具箱——用于标准分析的IRT、用于审计员校准的多面Rasch模型、用于维度结构的因子分析——将直接适用。
+
+**部署后监控。** 部署前基准测试衡量模型 *能* 做什么；部署后监控衡量模型在生产中 *实际* 做什么。有几个结构化的数据源正在涌现。**事故数据库** —— AI 事故数据库 [@mcgregor2021aiid]（AIID，基于 CSET 危害分类法的 1,404 起事故）、OECD AI 事故监测 [@oecd2024aiincidents]（14,000 多起事故）以及 MIT AI 风险库 [@slattery2024airiskrepo]（来自 74 个框架的 1,700 条风险条目）—— 记录了现实世界的 AI 故障，但其观测结构（事故日志，而非标准化的条目库）无法整洁地映射到响应矩阵。**生产交互日志**提供了更丰富的测量机会：WildChat [@zhao2024wildchat]（480 万条真实 ChatGPT 对话，并附带每条消息的审核标记）和 LMSYS ToxicChat [@lin2023toxicchat]（1 万条标记的生产提示）有效地提供了来自已部署系统的对话 × 安全类别二元矩阵。NVIDIA Aegis 2.0 [@ghosh2025aegis]（3.3 万条交互 × 23 个危害类别）提供了类似的结构。**监管监控数据** —— 尤其是 NHTSA 常设总命令碰撞报告 [@nhtsa2021sgo]（1,700 多起自动驾驶事故，以可下载的 CSV 格式提供）和加州 DMV 自动驾驶脱离报告 [@cadmv2024disengagement]（按制造商划分的 15,000 多次脱离）—— 提供了最结构化的部署后数据，其自然的交叉表（制造商 × 事故类型）起到了响应矩阵的作用。最后，**模型漂移研究** —— 最值得注意的是 @chen2024gpt4drift 记录的 GPT-4 在三个月内在某些任务上的准确率从 84% 骤降至 51% —— 揭示了响应矩阵本身并非静止不变：同一模型 × 项目对在不同时间可能产生不同的响应，违反了 IRT 关于能力参数固定不变的假设。
+
+![AI 事故数据库（AIID）报告的每年 AI 事故数量。指数级增长——从 2015 年的 24 起到 2025 年的 381 起——反映了 AI 系统部署的日益增加和报告基础设施的日益完善。2026 年的柱状图仅为部分数据（数据截至 2026 年 3 月）。](Figures/intervention/aiid_incidents.png){#fig-aiid-growth width="70%"}
+
+![ChatGPT 漂移：模型 × 任务准确率热力图，显示了不同 API 版本间的性能退化。GPT-3.5-turbo 在组合任务上的准确率从 0.99（2023 年 3 月版本）下降到 0.14（2023 年 6 月版本）。GPT-4 也表现出类似但不那么剧烈的退化。这表明响应矩阵并非静止不变——同一模型可能随时间对相同项目产生不同的响应。](Figures/intervention/chatgpt_drift.png){#fig-chatgpt-drift width="90%"}
+
+**思维链监控与行为轨迹。** 越来越多的工作不仅通过AI智能体的输出，还通过其内部推理过程对其进行监控。OpenAI 使用 GPT-5.4 Thinking 分析全部对话上下文（用户消息、思维链推理、工具调用及工具输出）来监控 99.9% 的内部编码智能体流量，以发现不对齐的迹象，结果发现推理模式会在不当行为实际执行之前揭示出令人担忧的行为（使用 base64 编码逃避监控、调用其他模型版本绕过限制）。这产生了**行为轨迹**：即思考 → 行动 → 观察链的顺序日志，它们并不对应响应矩阵，而是构成了一种全新的评估数据。目前已有多个公开数据集捕捉这种结构：Anthropic 的 alignment faking 数据集 [@anthropic2025alignmentfakingrl]（包含 214 万条强化学习训练对话记录及 alignment faking 标签，其中 34.6% 的样本表现出 alignment faking）、Scale AI 的 Monitor Red Teaming 数据集 [@kale2025mrt]（MRT，包含数千条试图通过撒谎和操控逃避监控的智能体轨迹）、BELLS [@dorn2024bells]（标注了幻觉、越狱和提示注入等类别的执行轨迹），以及 MACHIAVELLI 基准 [@pan2023machiavelli]（57.2 万个游戏场景，带有 25 个以上类别中密集的道德违规标注）。思维链忠实度数据集——FaithCoT-Bench [@shen2025faithcotbench]（1000 多条带步骤级忠实度标签的标注轨迹）以及 @turpin2023cot 的思维链不忠实性实验——则衡量推理链是否忠实于模型的实际决策过程。测量科学面临的挑战是：标准 IRT 假设题目相互独立，而行为轨迹本质上具有顺序性和上下文依赖性。开发适用于序列轨迹数据的心理测量工具，是一个开放的前沿领域。
+
+**对评估的评估。** 元评估——即评估方法本身的可靠性和有效性——正在兴起。RewardBench（149 个奖励模型 × 2985 个题目，现已纳入我们的数据集）[@lambert2024rewardbench] 对奖励模型进行了评估，PSN-IRT 项目 [@zhou2026lost] 则构建了涵盖 12 个模型与 41871 个题目的响应矩阵，并进行了完整的 IRT 参数估计。但关于 LLM 评判者、奖励模型和评估流程是否在 @sec-validity 的意义上具有测量有效性的系统性研究仍然很少。将 @sec-reliability 和 @sec-validity 中的信效度工具应用于评估方法本身——而不仅仅是被评估的系统——是一个重要的前沿方向。
+
+
+## 实践中的数据质量 {#sec-data-quality}
+
+现实世界中的评估数据是杂乱无章的。在拟合测量模型之前，实践者必须理解并解决几个反复出现的数据质量问题。
+
+### 评分不一致
+
+不同的基准使用不同的评分惯例，即使是对类似的任务也是如此。Pass@1 可能从 1 个样本计算（使其成为二元的）、10 个样本（给出 11 个离散值）或 200 个样本（逼近连续概率）。一些基准报告准确率，另一些报告错误率。一些基准对多步骤任务进行部分得分评分，另一些则使用全有或全无评分。将这些标准化为一个连贯的响应矩阵，需要仔细注意每个分数的含义。
+
+### 被试身份问题
+
+对于智能体基准，“谁是被试者？”这个问题并不简单。Terminal-Bench 包含 128 个智能体--模型组合，来自 31 个独特的框架和 42 个独特的模型 [@merrill2026terminalbench]。SWE-bench 包含诸如“SWE-Agent + Claude Sonnet 4”和“OpenHands + Claude Sonnet 4”的条目 --- 相同的模型，不同的框架，性能差异显著 [@jimenez2023swe]。当我们估计“Claude Sonnet 4 的能力”时，我们使用哪些行？答案取决于我们正在测量的构念：如果我们想要 *模型* 能力，我们应该以某种方式在框架之间求平均；如果我们想要 *系统* 能力，每个模型--框架组合本身就是它自己的被试。
+
+### 基准污染与时间有效性
+
+静态基准面临不可避免的生命周期：它们被发布，被社区采用，可能被在网页数据上训练的模型记忆，最终饱和。LiveCodeBench 通过从正在进行的竞赛中抽取问题来解决这个问题，确保项目在训练截止日期之后 [@jain2024livecodebench]。但这带来了一个新的挑战：项目池随时间变化，如果没有等值程序，纵向比较就变得困难。
+
+### 缺失数据模式
+
+AI 评估中的缺失数据很少是随机的。常见的模式包括：
+
+- **时间缺失**：较旧的模型在较少的项目上被评估（LiveCodeBench [@jain2024livecodebench]）
+- **成本驱动的缺失**：昂贵的模型在较少的基准上被评估
+- **可用性缺失**：闭源模型未在需要本地执行的基准上被评估
+- **选择缺失**：模型未在预期它们表现不佳的基准上被评估
+
+每种模式都违反了大多数插补方法所需的随机缺失假设。@sec-generalization 中开发的掩码方案提供了一个框架，用于测试模型如何处理不同的缺失模式。
+
+## `torch_measure` 工具包 {#sec-torch-measure}
+
+`torch_measure` 库提供了一个 PyTorch 原生的工具包，用于加载、检查和分析来自真实基准的响应矩阵。它是本书的配套软件。
+
+### 加载基准
+
+```{python}
+#| eval: false
+
+from torch_measure.datasets import load, list_datasets
+
+# See all available benchmarks
+list_datasets("bench")
+
+# Load a response matrix
+rm = load("bench/swebench")
+print(f"Shape: {rm.shape}")          # (134, 500)
+print(f"Density: {rm.density:.1%}")  # 100.0%
+print(f"Mean: {rm.subject_means.mean():.3f}")
+```
+
+### 检查响应矩阵
+
+```{python}
+#| eval: false
+
+# Per-subject (model) statistics
+print(f"Best model: {rm.subject_means.max():.1%}")
+print(f"Worst model: {rm.subject_means.min():.1%}")
+
+# Per-item statistics
+print(f"Easiest item: {rm.item_means.max():.1%}")
+print(f"Hardest item: {rm.item_means.min():.1%}")
+print(f"Items solved by no model: {(rm.item_means == 0).sum()}")
+
+# Missing data
+print(f"Missing entries: {(~rm.observed_mask).sum()}")
+```
+
+### 拟合测量模型
+
+```{python}
+#| eval: false
+
+from torch_measure.models import Rasch
+
+# Fit a Rasch model to the response matrix
+model = Rasch(n_subjects=rm.n_subjects, n_items=rm.n_items)
+model.fit(rm.data, method="mle")
+
+# Estimated parameters
+abilities = model.ability          # (134,) subject abilities
+difficulties = model.difficulty    # (500,) item difficulties
+
+# Predict response probabilities
+P_hat = model.predict()            # (134, 500)
+```
+
+### 比较基准测试
+
+```{python}
+#| eval: false
+
+# Load multiple benchmarks
+benchmarks = {
+    "SWE-bench": load("bench/swebench"),
+    "BigCodeBench": load("bench/bigcodebench"),
+    "BFCL": load("bench/bfcl"),
+    "MMLU-Pro": load("bench/mmlupro"),
+}
+
+for name, rm in benchmarks.items():
+    print(f"{name:15s}: {rm.n_subjects:4d} subjects × {rm.n_items:5d} items, "
+          f"density={rm.density:.1%}, mean={rm.subject_means.mean():.3f}")
+```
+
+### 加载成对响应矩阵
+
+```{python}
+#| eval: false
+
+# List intervention datasets
+list_datasets("intervention")
+
+# Load paired matrices from Collab-CXR (radiology)
+rm_no_ai = load("intervention/collab_cxr_accuracy_no_ai")
+rm_with_ai = load("intervention/collab_cxr_accuracy_with_ai")
+
+print(f"No AI:   {rm_no_ai.n_subjects} radiologists × {rm_no_ai.n_items} cases, "
+      f"mean accuracy={rm_no_ai.subject_means.mean():.3f}")
+print(f"With AI: {rm_with_ai.n_subjects} radiologists × {rm_with_ai.n_items} cases, "
+      f"mean accuracy={rm_with_ai.subject_means.mean():.3f}")
+
+# Load GenAI Learning exam data across conditions
+for arm in ["control", "augmented", "vanilla"]:
+    rm = load(f"intervention/genai_learning_exam_{arm}")
+    print(f"Exam ({arm:10s}): {rm.n_subjects} students × {rm.n_items} problems, "
+          f"mean={rm.subject_means.mean():.3f}")
+```
+
+由 `torch_measure` 加载的响应矩阵是后续一切的原始材料。@sec-foundations 介绍了将这些矩阵分解为可解释的潜在参数的概率模型。@sec-learning 展示了如何估计这些参数。本书的剩余部分则开发了用于评估所得测量是否可靠、有效和有用的工具。
+
+## 讨论问题 {#sec-data-discussion}
+
+1. **主题身份问题。** 对于 SWE-bench，排名最高的参赛作品使用了专有脚手架与 Claude Opus 4.5 [@jimenez2023swe]。一个使用开源脚手架和同一模型的竞争作品得分低 15%。这种差异应归因于模型、脚手架还是它们的交互作用？你如何设计一项研究来分解这些贡献？这对响应矩阵的维度有什么启示？
+
+2. **基准的文化效度。** AfriMedQA 评估非洲医疗环境中的医学知识 [@nimo2025afrimedqa]。一个主要基于美国/欧洲医学数据训练的模型可能得分较低，并非因为它缺乏医学推理能力，而是因为它缺乏对当地疾病流行率、治疗方案和医疗基础设施的了解。这是一种效度威胁（构念无关变异），还是对构念（*在语境中的* 医学推理）的真实测量？答案如何取决于预期用途？
+
+3. **动态与静态基准。** LiveCodeBench 从正在进行的竞赛中添加新问题以避免污染 [@jain2024livecodebench]。但这意味着模型的“能力”是在不同时间点从不同项目估计出来的。在什么条件下这会成为问题？你将如何使用 IRT 等值程序来维持一个共同的量表？
+
+4. **偏好数据与传递性。** Bradley-Terry 模型假设偏好具有传递性：如果 $A \succ B$ 且 $B \succ C$，那么 $A \succ C$。但人类偏好常常违反传递性。你将如何检测和量化 Chatbot Arena 数据中的传递性违反情况？使用 Elo 评分作为模型质量衡量指标有何影响？
+
+5. **缺失数据问题。** 在 torch_measure 集合中，一些基准几乎完整（SWE-bench：100% 密度 [@jimenez2023swe]），而另一些则有系统性的空白（LiveCodeBench：88.8% [@jain2024livecodebench]）。缺失模式如何影响 IRT 能力估计的效度？在什么条件下你会信任来自稀疏矩阵的能力估计？
+
+6. **干预矩阵与因果推断。** GenAI Learning 数据集显示，使用 ChatGPT 练习的学生在练习阶段得分为 0.69，但在无 AI 考试中仅得 0.36——与对照组的 0.36 相同。仅对练习阶段进行简单分析就会得出 AI 大幅提升表现的结论。这对解读人类与 AI 的基准分数有何启示？您将如何设计一个评估框架，以区分 AI 增强的绩效与持久的人类能力？请考虑教育之外领域的含义——例如，医生经过多年 AI 辅助实践后，其诊断能力是真正提高，还是会萎缩？
+
+
+## 文献注释 {#sec-data-bib}
+
+AI 评估的响应矩阵表述借鉴了心理测量学中有关项目分析和测验编制的广泛文献 [@lord1968statistical; @hambleton1985irt]。从 AI 基准中系统整理响应矩阵是较新的工作；`torch_measure` 工具包及其基准集合遵循本章所述的标准化方法。
+
+各个基准有其各自的渊源。SWE-bench [@jimenez2023swe] 确立了在真实 GitHub 议题上评估智能体的范式。MMLU [@hendrycks2021measuring] 及其后继者（MMLU-Pro [@wang2024mmlupro]）规范了跨领域的知识评估。Chatbot Arena [@zheng2023judging] 率先开展了大规模的众包成对评估。LiveCodeBench [@jain2024livecodebench] 将时效性作为抗污染评估的设计原则。
+
+配对响应矩阵框架与基准之外更广泛的 AI 评估文献相连。AI 编码助手的部署随机对照试验 (RCT) 包括 GitHub Copilot 研究 [@peng2023copilot; @cui2024copilot] 和 METR 开发者生产力研究 [@becker2025metr]，后者得出了出人意料的发现：经验丰富的开发者在 AI 辅助下反而更慢。Collab-CXR 数据集 [@yu2024collabcxr] 是规模最大的包含 AI 辅助与无辅助条件的公开读者研究。Bastani 等人 [@bastani2025genai] 证明 AI 可以虚增表面绩效而不产生学习效果。HAIID 研究 [@vodrahalli2022haiid] 表明，建议来源标签对人类行为影响甚微，为关于算法厌恶与欣赏的文献做出了贡献。在 CBRN 赋能评估方面，RAND 生物安全研究和 OpenAI 的早期预警系统评估最为突出，尽管两者均未公开项目级数据。Salaudeen、Koyejo 等人 [-@salaudeen2025measurement] 提供了一个以效度为中心的 AI 评估理论框架，为本文所采用的心理测量学方法处理配对响应数据提供了依据。
+
+多语言和文化评估工作回应了AI评测中一个公认的差距。C-Eval [@huang2023ceval] 和 CMMLU [@li2023cmmlu] 提供了中文评测。KMMLU 提供了韩语评测。IberBench 覆盖伊比利亚诸语言。AfriEval 和 AfriMedQA [@nimo2025afrimedqa] 面向非洲语言和医疗语境。SIB-200 提供跨200多种语言的分类。HELM Multilingual [@bommasani2024holistic] 标准化了跨语言评测。这些努力共同表明，AI评测格局无法仅通过英语基准来理解。
+
+对于偏好数据，Bradley-Terry模型可追溯到 @bradley1952rank。在聊天机器人竞技场中广泛使用的Elo评分系统实现了在线Bradley-Terry估计。RewardBench [@lambert2024rewardbench] 标准化了奖励模型评估。偏好模型与测量理论之间的关系在配套著作 *Machine Learning from Human Preferences*（Truong & Koyejo, 2026）中得到了阐述。

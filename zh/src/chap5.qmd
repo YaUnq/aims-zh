@@ -1,0 +1,1039 @@
+﻿---
+format:
+  html:
+    include-after-body:
+      text: |
+        <script>
+        // Auto-execute all pyodide cells after initialization
+        document.addEventListener('DOMContentLoaded', function() {
+          function waitForPyodide() {
+            if (typeof globalThis.mainPyodide !== 'undefined' && globalThis.mainPyodide) {
+              if (typeof globalThis.qpyodideCellDetails !== 'undefined') {
+                globalThis.qpyodideCellDetails.forEach((cell, index) => {
+                  if (cell.options && cell.options.autorun === 'true') {
+                    setTimeout(() => {
+                      const runButton = document.querySelector(`#qpyodide-button-run-${cell.id}`);
+                      if (runButton && !runButton.disabled) {
+                        runButton.click();
+                      }
+                    }, index * 1000);
+                  }
+                });
+              }
+            } else {
+              setTimeout(waitForPyodide, 500);
+            }
+          }
+          setTimeout(waitForPyodide, 2000);
+        });
+        </script>
+filters:
+  - pyodide
+pyodide:
+  packages:
+    - numpy
+    - matplotlib
+    - scipy
+---
+
+# Reliability {#sec-reliability}
+
+::: {.callout-note title="预期学习成果"}
+通过本章学习，你将能够：
+
+1. 在人工智能评估的背景下**定义**可靠性，并将其与效度区分开来。
+2. **应用**经典测验理论将观测分数分解为信号和噪声。
+3. 为人工智能基准**计算**可靠性系数（克朗巴赫α、分半、重测）。
+4. **解释**概化理论，并用其量化多个测量误差源（项目、评分者、场合）。
+5. **分析**人工智能评估中的噪声来源：标注变异、提示敏感性、模型随机性和基准抽样。
+6. **评估**LLM-as-a-judge评估方案的可靠性。
+7. **设计**能控制已识别不可靠来源的评估程序。
+:::
+
+::: {.callout-tip title="建议授课计划" collapse="true"}
+本章可分**3次课**讲授（每次75-90分钟）：
+
+**第1讲：人工智能测量中的信号与噪声**
+
+- 当排行榜闪烁不定：引入可靠性（15分钟）
+- 经典测验理论：真分数 + 误差（25分钟）
+- 人工智能基准的可靠性系数（25分钟）
+- 实践：分半信度与克朗巴赫α（10分钟）
+
+**第2讲：概化理论**
+
+- 噪声来源：人工智能评估的分类学（15分钟）
+- 从CTT到G理论：多重误差面（25分钟）
+- 基准设计的G研究与D研究（25分钟）
+- 实践：方差分解与D研究优化（10分钟）
+
+**第3讲：实践中的可靠性**
+
+- LLM-as-a-judge的可靠性（25分钟）
+- 评分者间一致性：kappa及其局限（15分钟）
+- IRT下的可靠性：条件精度（20分钟）
+- 可靠的人工智能评估设计原则（15分钟）
+:::
+
+::: {.callout-note title="符号说明"}
+本章介绍经典测验理论符号：$X_{ij} = T_i + E_{ij}$（观测值 = 真值 + 误差），$\rho_{XX'}$（可靠性），$\alpha$（克朗巴赫α），$\sigma^2_p, \sigma^2_i, \sigma^2_r$（G理论方差成分），以及$\kappa$（Cohen's kappa）。完整符号参考见[符号附录](notation.qmd)。
+:::
+
+
+## 当排行榜闪烁不定 {#sec-leaderboards-flicker}
+
+设想你对十个语言模型实施了一项推理基准评估，并将排名报告给了团队。第二天，一位同事重新运行了相同的评估，却得到了不同的排名。前两名的模型互换了位置，一个原本第四的模型现在升至第二。模型本身没有任何变化——仅仅是测量过程在细微之处有所不同：稍有变化的提示模板、用于采样的不同随机种子，或是对开放式回答进行评分的不同标注者子集。
+
+这就是信度问题。在我们能够询问一个基准是否测量了其声称要测量的东西（效度问题，将在 @sec-validity 中讨论）之前，我们必须先问一个更基本的问题：*将同样的评估应用于同一个东西两次，会给出相同的答案吗？*
+
+信度并非准确度。一个总是偏高两度的温度计是可靠的——它每次都给出相同的读数——尽管它并不准确。相反，一个读数之间随机波动的温度计是不可靠的，因此在任何有用的意义上都不可能是准确的。在测量科学中，信度指的是测量程序的*一致性*或*可再现性*。
+
+::: {.callout-important title="信度是效度的必要条件"}
+如果一个评估程序每次应用于同一个模型时都产生不同的结果，那么它不可能测量出任何有关该模型的东西。不可靠的测量就是噪声，无论基准被设计得多么仔细。@sec-validity 处理的是效度问题——我们是否在测量*正确*的东西。本章处理的是先决问题：我们究竟是否测量了*任何*东西？
+:::
+
+AI 评估中不一致的来源多种多样：提示词格式、温度采样、标注者分歧、基准项选择、评分标准模糊，甚至 API 版本漂移。每个来源都会引入噪声，从而扭曲模型排名。本章提供了量化、分解和控制这些噪声源的理论工具，借鉴测量科学中的经典测验理论和概化理论，并将其全面应用于评估 AI 系统的具体挑战。
+
+
+## AI 评估的经典测验理论 {#sec-ctt-reliability}
+
+### 真分数模型 {#sec-true-score-model}
+
+回顾 @sec-foundations 中的分解 $X = T + E$：每个观测分数都是真分数与误差之和。现在我们来正式展开这一内容。
+
+令 $X_{ij}$ 为模型 $i$ 在测量场合 $j$ 上的观测分数（其中“场合”可能指某次特定的运行、特定的提示词模板，或特定的标注者）。真分数 $T_i$ 定义为在假设重复上的期望：
+
+$$
+T_i = \mathbb{E}_j[X_{ij}]
+$$
+
+误差 $E_{ij} = X_{ij} - T_i$ 满足三个公理：
+
+1. **零均值：** 对所有 $i$，$\mathbb{E}_j[E_{ij}] = 0$
+2. **与真分数不相关：** $\text{Cov}(T_i, E_{ij}) = 0$
+3. **跨场合不相关：** 对 $j \neq k$，$\text{Cov}(E_{ij}, E_{ik}) = 0$
+
+这些假设给出了基本的方差分解：
+
+$$
+\sigma^2_X = \sigma^2_T + \sigma^2_E
+$$
+
+::: {.callout-note title="定义：信度"}
+信度是观测分数方差中真分数方差所占的比例：
+
+$$
+\rho_{XX'} = \frac{\sigma^2_T}{\sigma^2_X} = \frac{\sigma^2_T}{\sigma^2_T + \sigma^2_E} = 1 - \frac{\sigma^2_E}{\sigma^2_X}
+$$
+
+等价地，信度是观察分数与真分数之间相关系数的平方：$\rho_{XX'} = r^2_{XT}$。
+:::
+
+在AI评估中，“真分数”$T_i$ 代表模型$i$在待测量构念上的稳定能力。“误差”$E_{ij}$ 包含所有导致观察分数偏离此稳定能力的因素：提示变化、抽样随机性、标注者分歧、项目选择等。
+
+这直接关联到第3章CAT终止规则中使用的信度公式：$R = 1 - \sigma^2_{\text{post}} / \sigma^2_{\text{prior}}$。IRT版本与CTT版本表达了相同的理念——两者都测量方差中信噪比的部分。
+
+
+### 测量标准误 {#sec-sem}
+
+测量标准误（SEM）将信度转换为围绕个体分数的置信区间：
+
+$$
+\text{SEM} = \sigma_X \sqrt{1 - \rho_{XX'}}
+$$
+
+对于AI基准测试，SEM具有直接的实际意义。假设一个基准测试报告的准确率分数的标准差为$\sigma_X = 5$个百分点，信度为$\rho_{XX'} = 0.90$。那么：
+
+$$
+\text{SEM} = 5 \sqrt{1 - 0.90} \approx 1.58 \text{ points}
+$$
+
+任何模型分数周围的95%置信区间跨度约为$\pm 2 \times \text{SEM} \approx \pm 3.2$个点。两个模型分数之差若小于此界限，可能并非真正差异显著——它们在复现中很容易交换排名。这在拥挤的排行榜上是常见情况，那里数十个模型挤在彼此仅几个百分点的范围内。
+
+
+### 信度系数 {#sec-reliability-coefficients}
+
+由于真分数不可观测，信度必须从数据中估计。三种经典方法对应不同的实验设计，各自适用于不同的AI评估场景。
+
+**重测信度。** 对相同模型在两个时间点施测同一基准，并计算两组分数的相关性。对于AI：在以温度 $> 0$（不同的随机种子）重新运行评估，或让相同标注者在两次不同场合对相同的输出进行评分。两组分数之间的皮尔逊相关系数估计 $\rho_{XX'}$。此方法简单，但将所有时间间变异来源混为一个数字。
+
+**分半信度。** 将基准项目随机分为两半，分别计算每半的分数，然后计算这两半分数的相关性。斯皮尔曼-布朗校正用于弥补每半长度仅为完整测验一半的事实：
+
+$$
+\rho_{XX'} = \frac{2 r_{12}}{1 + r_{12}}
+$$
+
+其中 $r_{12}$ 是两半分数之间的相关性。对于AI评估，这很容易从现有数据中计算——无需重新运行。
+
+**内部一致性信度（克隆巴赫α系数）。** 最广泛使用的信度系数，通过平均所有可能的分半方式来推广分半信度：
+
+$$
+\alpha = \frac{M}{M - 1} \left(1 - \frac{\sum_{j=1}^M \sigma^2_j}{\sigma^2_X}\right)
+$$ {#eq-cronbach-alpha}
+
+其中 $M$ 是题目数量，$\sigma^2_j$ 是题目 $j$ 在不同模型间的方差，$\sigma^2_X$ 是总分的方差。
+
+::: {.callout-warning title="克隆巴赫系数能告诉你什么和不能告诉你什么"}
+克隆巴赫系数测量的是各题目相对于总方差的协变程度。高系数意味着这些题目在测量某种共同的东西。但系数并*不*能告诉你：(a) 这个共同的东西是否是一维的，(b) 这个共同的东西是否就是你想要的构念，或者 (c) 这个测试是否不存在系统偏差。
+
+一个 $\alpha = 0.95$ 的基准测试，可能是在可靠地测量训练数据污染，而非预期的能力。高信度是良好测量的必要但不充分条件。
+:::
+
+
+**斯皮尔曼-布朗预测公式**预测信度如何随测验长度变化。如果一个由 $M$ 道题目组成的测验信度为 $\rho$，那么由 $K$ 个平行版本组成、共包含 $KM$ 道题目的测验，其信度为：
+
+$$
+\rho_K = \frac{K \rho}{1 + (K-1)\rho}
+$$ {#eq-spearman-brown}
+
+这个公式在实践中很重要：它告诉你需要多少道题目才能达到目标信度。假设你有一个 50 道题目的基准测试，信度 $\rho = 0.80$，你需要 $K = 2$（即 100 道题）才能达到 $\rho = 0.89$，或者 $K = 4$（即 200 道题）才能达到 $\rho = 0.94$。
+
+{{< include _plt_setup.qmd >}}
+
+```{pyodide-python}
+#| label: reliability-coefficients
+#| autorun: true
+#| fig-cap: "左侧：来自模拟拉希基准的分半信度。中间：克隆巴赫α系数随测试长度增加，符合斯皮尔曼-布朗预言公式。右侧：随着项目增多，信度提高，测量标准误差（SEM）下降。"
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import pearsonr
+
+def sigmoid(x):
+    """Numerically stable sigmoid function."""
+    return np.where(x >= 0,
+                    1 / (1 + np.exp(-x)),
+                    np.exp(x) / (1 + np.exp(x)))
+
+# Simulate benchmark data under the Rasch model
+np.random.seed(42)
+N = 100  # models
+M = 100  # items
+theta = np.random.normal(0, 1, N)
+beta = np.random.normal(0, 1.5, M)
+
+# Generate binary response matrix
+P = sigmoid(theta[:, None] - beta[None, :])
+Y = (np.random.rand(N, M) < P).astype(float)
+
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+# Panel 1: Split-half reliability
+half1 = Y[:, :M//2].mean(axis=1)
+half2 = Y[:, M//2:].mean(axis=1)
+r12, _ = pearsonr(half1, half2)
+rho_sb = 2 * r12 / (1 + r12)
+
+axes[0].scatter(half1, half2, alpha=0.5, s=15, color='steelblue')
+axes[0].plot([0, 1], [0, 1], 'k--', alpha=0.3)
+axes[0].set_xlabel('Half 1 Score')
+axes[0].set_ylabel('Half 2 Score')
+axes[0].set_title(f'Split-Half (ρ = {rho_sb:.3f})')
+axes[0].grid(True, alpha=0.3)
+
+# Panel 2: Cronbach's alpha vs number of items (Spearman-Brown)
+item_counts = np.arange(5, M + 1, 5)
+alphas = []
+for m in item_counts:
+    Y_sub = Y[:, :m]
+    item_vars = Y_sub.var(axis=0, ddof=1)
+    total_var = Y_sub.sum(axis=1).var(ddof=1)
+    alpha_val = (m / (m - 1)) * (1 - item_vars.sum() / total_var)
+    alphas.append(alpha_val)
+
+# Spearman-Brown prediction from base reliability (5 items)
+base_rho = alphas[0]
+K_vals = item_counts / item_counts[0]
+sb_predicted = K_vals * base_rho / (1 + (K_vals - 1) * base_rho)
+
+axes[1].plot(item_counts, alphas, 'o-', color='steelblue', markersize=3,
+             linewidth=1.5, label='Empirical α')
+axes[1].plot(item_counts, sb_predicted, '--', color='coral', linewidth=1.5,
+             label='Spearman-Brown')
+axes[1].set_xlabel('Number of Items')
+axes[1].set_ylabel("Cronbach's α")
+axes[1].set_title('Reliability vs Test Length')
+axes[1].legend(fontsize=7)
+axes[1].grid(True, alpha=0.3)
+axes[1].set_ylim(0, 1)
+
+# Panel 3: SEM vs number of items
+sigma_X = np.array([Y[:, :m].mean(axis=1).std() for m in item_counts])
+sems = sigma_X * np.sqrt(1 - np.array(alphas))
+
+axes[2].plot(item_counts, sems, 'o-', color='steelblue', markersize=3, linewidth=1.5)
+axes[2].set_xlabel('Number of Items')
+axes[2].set_ylabel('SEM (score units)')
+axes[2].set_title('Standard Error of Measurement')
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+print(f"Full test ({M} items): α = {alphas[-1]:.3f}, SEM = {sems[-1]:.4f}")
+print(f"Half test ({M//2} items): α = {alphas[len(alphas)//2 - 1]:.3f}")
+print(f"Spearman-Brown from 5 items: predicted α at {M} items = {sb_predicted[-1]:.3f}")
+```
+
+
+## 人工智能评估中的噪声来源 {#sec-noise-sources}
+
+经典测试理论（Classical Test Theory）将所有误差归入单个项 $E$。为了提高评估的信度，我们需要了解噪声*来自何处*。本节提供了专门针对人工智能评估的噪声来源分类。
+
+### 误差来源分类 {#sec-error-taxonomy}
+
+我们按作用层级对噪声来源进行组织：
+
+| 来源 | 层级 | CTT 解释 | 示例 |
+|--------|-------|-------------------|---------|
+| 抽样随机性 | 模型内 | 重测误差 | 温度 > 0 时产生不同输出 |
+| 提示敏感性 | 模型内 | 格式效应 | 不同的提示模板产生不同的分数 |
+| 题目抽样 | 基准内 | 平行复本误差 | 不同的题目子集 |
+| 标注者分歧 | 评分内 | 评分者误差 | 不同的人对同一输出打出不同分数 |
+| LLM 裁判变异性 | 评分内 | 评分者误差 | 不同的 LLM 裁判意见不一致 |
+| 评分标准模糊性 | 评分内 | 系统误差 + 随机误差 | 模糊的标准被不同解读 |
+| API/版本漂移 | 跨时间 | 重测误差 | 模型权重悄悄更新 |
+
+每个来源都对 $\sigma^2_E$ 有贡献，但它们的方式不同，需要的补救措施也不同。对于开放式评估，提示敏感性和标注者分歧可能是主导因素，而对于固定格式基准，题目抽样变异性则占主导地位。
+
+
+### 提示敏感性 {#sec-prompt-sensitivity}
+
+即使是确定性模型（温度 = 0），在不同的提示格式下也会产生不同的回答。在推理提示中加入“让我们一步步思考”，将答案格式从选择题改为开放式，甚至重新排列少样本示例，都可能改变模型排名 [@mizrahi2024state]。这类似于教育测试中的*测验格式效应*——同样的知识，选择题考试和自由回答考试会测出不同的结果。
+
+提示敏感性威胁到信度，因为“真分数”取决于所使用的提示模板。如果模型 $A$ 在一个模板上优于模型 $B$，而在另一个模板上并非如此，那么模型的相对排名就取决于提示，而非能力。
+
+
+### 抽样随机性 {#sec-sampling-stochasticity}
+
+当温度 $> 0$ 时，同一个模型对同一提示，每次运行都会给出不同的输出。这与经典的重测误差最相似：模型的回答是从其分布中随机抽取的，不同的抽取产生不同的分数。不同运行之间的模型内方差直接放大了 $\sigma^2_E$。
+
+对于二元题目（正确/错误），这一来源影响很小——大多数模型都会确定性地给出相同答案。但对于开放式生成（摘要、代码、作文），随机输出在不同运行中可能获得不同的质量评分。
+
+
+### 标注者与裁判变异性 {#sec-annotator-variability}
+
+对于无法自动评分的任务——创意写作、安全性评估、开放式推理——人类标注者或LLM评判员必须评估质量。不同的评分者之间常有分歧，而这种分歧是导致不可靠性的主要来源。
+
+::: {.callout-note title="定义：Cohen's Kappa"}
+对于两位评分者在分类量表上对同一组项目进行评分的情况，Cohen's kappa [@cohen1960coefficient] 校正了随机一致性：
+
+$$
+\kappa = \frac{p_o - p_e}{1 - p_e}
+$$
+
+其中 $p_o$ 是观察到的实际一致比例，$p_e$ 是随机期望的一致比例。$\kappa = 1$ 表示完全一致；$\kappa = 0$ 表示一致性不比随机更好；$\kappa < 0$ 表示系统性分歧。
+:::
+
+对于超过两位评分者的情况，Fleiss's kappa [@fleiss1971measuring] 将其扩展到多个标注者。Krippendorff's alpha [@krippendorff2011computing] 提供了一个更通用的度量，可处理缺失数据、有序量表和任意数量的评分者。
+
+
+### 基准采样变异性 {#sec-benchmark-sampling}
+
+基准本身是从更大可能项目域中抽取的一个样本。不同的样本会产生不同的模型排名。一个包含200个问题的编程基准是从所有可能的编程问题空间中抽取的一个样本；从同一领域再抽取200个问题的另一个样本，很可能会产生略有不同的分数。
+
+这就是可靠性中的项目抽样成分，也是 @eq-spearman-brown 所针对的来源：更长的测试能够更彻底地抽样该领域，因此更可靠。这也与第3章的设计视角相联系：通过选择信息量最大的样本，D-最优项目选择可最小化这种变异性。
+
+```{pyodide-python}
+#| label: noise-decomposition
+#| autorun: true
+#| fig-cap: "左：方差分解表明，条目抽样和标注者分歧通常占主导地位。中：模型排名在不同评估条件下发生变化。右：重叠的置信区间显示排名不可靠之处。"
+
+np.random.seed(42)
+N = 20    # models
+M = 50    # items
+R = 5     # raters per item
+
+# True abilities and item difficulties
+theta = np.linspace(-2, 2, N)
+beta = np.random.normal(0, 1.5, M)
+
+# Variance parameters for each noise source
+sigma_prompt = 0.3    # prompt sensitivity (shifts difficulty)
+sigma_sample = 0.0    # item sampling (captured by different subsets)
+sigma_rater = 0.5     # rater noise (scoring variability)
+sigma_stoch = 0.2     # sampling stochasticity (model randomness)
+
+# Generate a full evaluation with all noise sources
+def run_evaluation(theta, beta, sigma_prompt, sigma_rater, sigma_stoch, seed=None):
+    if seed is not None:
+        np.random.seed(seed)
+    N, M = len(theta), len(beta)
+    # Prompt effect: shifts item difficulties
+    prompt_shift = np.random.normal(0, sigma_prompt, M)
+    beta_eff = beta + prompt_shift
+    # Model stochasticity: shifts ability
+    stoch_shift = np.random.normal(0, sigma_stoch, N)
+    theta_eff = theta + stoch_shift
+    # Generate responses
+    P = sigmoid(theta_eff[:, None] - beta_eff[None, :])
+    Y = (np.random.rand(N, M) < P).astype(float)
+    # Rater noise on total scores
+    scores = Y.mean(axis=1) + np.random.normal(0, sigma_rater / np.sqrt(M), N)
+    return scores, Y
+
+# Run multiple replications
+n_reps = 200
+all_scores = np.zeros((n_reps, N))
+for rep in range(n_reps):
+    scores, _ = run_evaluation(theta, beta, sigma_prompt, sigma_rater, sigma_stoch, seed=rep)
+    all_scores[rep] = scores
+
+# Variance decomposition (approximate via simulation)
+mean_scores = all_scores.mean(axis=0)
+total_var = all_scores.var()
+between_model_var = mean_scores.var()
+within_model_var = all_scores.var(axis=0).mean()
+
+# Run with individual sources turned off to estimate contributions
+var_components = {}
+for name, sp, sr, ss in [('Prompt', 0, sigma_rater, sigma_stoch),
+                          ('Rater', sigma_prompt, 0, sigma_stoch),
+                          ('Stochastic', sigma_prompt, sigma_rater, 0),
+                          ('Full', sigma_prompt, sigma_rater, sigma_stoch)]:
+    reps = np.zeros((100, N))
+    for rep in range(100):
+        s, _ = run_evaluation(theta, beta, sp, sr, ss, seed=rep + 1000)
+        reps[rep] = s
+    var_components[name] = reps.var(axis=0).mean()
+
+# Estimate each component's contribution
+prompt_contrib = var_components['Full'] - var_components['Prompt']
+rater_contrib = var_components['Full'] - var_components['Rater']
+stoch_contrib = var_components['Full'] - var_components['Stochastic']
+residual = max(0, within_model_var - prompt_contrib - rater_contrib - stoch_contrib)
+
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+# Panel 1: Variance decomposition
+components = [between_model_var, prompt_contrib, rater_contrib, stoch_contrib]
+labels = ['Model\n(signal)', 'Prompt\nformat', 'Rater\nnoise', 'Sampling\nstoch.']
+colors = ['#2ca02c', '#ff7f0e', '#d62728', '#9467bd']
+bars = axes[0].bar(labels, components, color=colors, alpha=0.8)
+axes[0].set_ylabel('Variance')
+axes[0].set_title('Variance Decomposition')
+axes[0].grid(True, alpha=0.3, axis='y')
+
+# Panel 2: Ranking shifts across conditions
+conditions = [run_evaluation(theta, beta, sigma_prompt, sigma_rater, sigma_stoch, seed=s)
+              for s in [10, 20, 30]]
+rankings = [np.argsort(-s[0]) for s in conditions]
+
+for i in range(N):
+    positions = [np.where(r == i)[0][0] for r in rankings]
+    color = plt.cm.viridis(theta[i] / 4 + 0.5)
+    axes[1].plot([1, 2, 3], positions, '-o', color=color, alpha=0.5,
+                 markersize=3, linewidth=0.8)
+
+axes[1].set_xlabel('Evaluation Run')
+axes[1].set_ylabel('Rank')
+axes[1].set_title('Ranking Instability')
+axes[1].set_xticks([1, 2, 3])
+axes[1].invert_yaxis()
+axes[1].grid(True, alpha=0.3)
+
+# Panel 3: Score distributions with confidence intervals
+score_means = all_scores.mean(axis=0)
+score_sems = all_scores.std(axis=0)
+order = np.argsort(score_means)
+
+axes[2].barh(range(N), score_means[order], xerr=1.96 * score_sems[order],
+             color='steelblue', alpha=0.7, capsize=2, height=0.7)
+axes[2].set_xlabel('Mean Score')
+axes[2].set_ylabel('Model (ranked)')
+axes[2].set_title('Scores with 95% CI')
+axes[2].set_yticks([])
+axes[2].grid(True, alpha=0.3, axis='x')
+
+plt.tight_layout()
+plt.show()
+
+reliability = between_model_var / total_var
+print(f"Signal (between-model) variance: {between_model_var:.4f}")
+print(f"Noise (within-model) variance: {within_model_var:.4f}")
+print(f"Estimated reliability: {reliability:.3f}")
+```
+
+
+## 概化理论 {#sec-gtheory}
+
+### 从单一误差到多重误差 {#sec-ctt-limits}
+
+CTT 只给出一个单一的信度数值，将所有的误差来源都归入 $\sigma^2_E$。这有助于快速总结，但当您需要*提高* 信度时就不够了——您无法修复您没有诊断出的问题。如果您的评估因标注者不一致而不可靠，增加更多题目也无济于事。如果是因为题目抽样变异性而不可靠，增加更多标注者也于事无补。
+
+由 @cronbach1972dependability 发展的概化理论（G-theory）通过同时建模测量的多个*侧面*来解决这一局限性。如果说 CTT 问的是“这个测试有多可靠？”，那么 G-theory 问的是“每个来源的方差有多大，我们如何才能设计出使误差最小化的测量程序？”
+
+### 概化理论框架 {#sec-gtheory-framework}
+
+考虑一项评估：$N$ 个模型在 $M$ 个题目上接受测试，每个题目都由 $R$ 位评分者评分。那么，模型 $p$ 在题目 $i$ 上由评分者 $r$ 给出的观测分数可分解为：
+
+$$
+X_{pir} = \mu + \alpha_p + \beta_i + \gamma_r + (\alpha\beta)_{pi} + (\alpha\gamma)_{pr} + (\beta\gamma)_{ir} + \epsilon_{pir}
+$$
+
+其中 $\mu$ 是总均值，每个希腊字母代表一个随机效应：
+
+- $\alpha_p$：模型效应（我们想要测量的信号），方差为 $\sigma^2_p$
+- $\beta_i$：题目效应（有些题目更难），方差为 $\sigma^2_i$
+- $\gamma_r$：评分者效应（有些评分者更宽松），方差为 $\sigma^2_r$
+- $(\alpha\beta)_{pi}$：模型与题目交互作用（题目 $i$ 对模型 $p$ 尤其困难），方差为 $\sigma^2_{pi}$
+- $(\alpha\gamma)_{pr}$：模型与评分者交互作用（评分者 $r$ 对模型 $p$ 尤其苛刻），方差为 $\sigma^2_{pr}$
+- $(\beta\gamma)_{ir}$：题目与评分者交互作用，方差为 $\sigma^2_{ir}$
+- $\epsilon_{pir}$：残差（其它一切），方差为 $\sigma^2_{pir,e}$
+
+AI 评估的对应关系是直接的：
+
+| 概化理论术语 | AI 评估类比 |
+|--------------|----------------------|
+| 人物 ($p$) | 被评估的模型 |
+| 题目 ($i$) | 基准测试问题或任务 |
+| 评分者 ($r$) | 人类标注者或 LLM 评判器 |
+| 场合 ($o$) | 运行、随机种子或提示变体 |
+
+::: {.callout-note title="定义：概化系数"}
+概化系数是真分数方差与真分数加相对误差方差之比：
+
+$$
+G = \frac{\sigma^2_p}{\sigma^2_p + \sigma^2_{\text{rel}}}
+$$
+
+其中，对于有 $n_i$ 个题目和 $n_r$ 个评分者的设计，相对误差方差为：
+
+$$
+\sigma^2_{\text{rel}} = \frac{\sigma^2_{pi}}{n_i} + \frac{\sigma^2_{pr}}{n_r} + \frac{\sigma^2_{pir,e}}{n_i \cdot n_r}
+$$
+:::
+
+
+### G-研究和 D-研究 {#sec-g-d-studies}
+
+概化理论将估计阶段和设计阶段分开：
+
+**G-study（概化研究）：** 从一个完全或部分交叉的设计中收集数据，并估计所有的方差分量。这告诉你*噪声在哪里*——即诊断步骤。方差分量通常通过期望均方方法（ANOVA）或限制性最大似然估计（REML）来估计。
+
+**D-study（决策研究）：** 给定 G-study 中的方差分量，计算一个*计划*评估设计的概化系数。这回答了诸如：“我需要多少题目和评分者才能达到 $G \geq 0.90$？”的问题。
+
+关键洞察在于你可以*权衡*各个测量侧面。如果评分者方差占主导（$\sigma^2_{pr}$ 很大），那么增加 $n_r$ 比增加 $n_i$ 更具成本效益。如果题目取样方差占主导（$\sigma^2_{pi}$ 很大），那么增加题目数量比增加评分者数量更有帮助。D-study 使这些权衡变得明确且量化。
+
+```{pyodide-python}
+#| label: gtheory-simulation
+#| autorun: true
+#| fig-cap: "左：模拟G研究中的方差成分估计揭示了噪声的来源。中：D研究展示了G系数如何随项目和评分者数量的增加而提升。右：不同预算下的成本最优设计。"
+
+np.random.seed(42)
+
+# True variance components
+true_var = {
+    'p': 1.0,     # model (signal)
+    'i': 0.5,     # item
+    'r': 0.3,     # rater
+    'pi': 0.4,    # model x item interaction
+    'pr': 0.3,    # model x rater interaction
+    'ir': 0.1,    # item x rater interaction
+    'e': 0.2      # residual
+}
+
+# Simulate data: 30 models x 20 items x 5 raters
+N_p, N_i, N_r = 30, 20, 5
+
+# Generate random effects
+alpha_p = np.random.normal(0, np.sqrt(true_var['p']), N_p)
+beta_i = np.random.normal(0, np.sqrt(true_var['i']), N_i)
+gamma_r = np.random.normal(0, np.sqrt(true_var['r']), N_r)
+ab_pi = np.random.normal(0, np.sqrt(true_var['pi']), (N_p, N_i))
+ag_pr = np.random.normal(0, np.sqrt(true_var['pr']), (N_p, N_r))
+bg_ir = np.random.normal(0, np.sqrt(true_var['ir']), (N_i, N_r))
+eps = np.random.normal(0, np.sqrt(true_var['e']), (N_p, N_i, N_r))
+
+# Construct observed scores
+mu = 5.0
+X = (mu + alpha_p[:, None, None] + beta_i[None, :, None] + gamma_r[None, None, :]
+     + ab_pi[:, :, None] + ag_pr[:, None, :] + bg_ir[None, :, :] + eps)
+
+# Estimate variance components via method of moments (ANOVA)
+grand_mean = X.mean()
+MS_p = N_i * N_r * X.mean(axis=(1, 2)).var(ddof=1)
+MS_i = N_p * N_r * X.mean(axis=(0, 2)).var(ddof=1)
+MS_r = N_p * N_i * X.mean(axis=(0, 1)).var(ddof=1)
+MS_pi = N_r * X.mean(axis=2).var(ddof=1) * N_p * N_i / ((N_p - 1) * (N_i - 1))
+MS_pr = N_i * X.mean(axis=1).var(ddof=1) * N_p * N_r / ((N_p - 1) * (N_r - 1))
+
+# Simplified variance component estimates
+est_var_p = max(0, (MS_p - MS_pi) / (N_i * N_r))
+est_var_i = max(0, (MS_i) / (N_p * N_r))
+est_var_r = max(0, (MS_r) / (N_p * N_i))
+
+# For interactions, use residual-based estimates
+X_pi = X.mean(axis=2)  # average over raters
+est_var_pi = max(0, X_pi.var() - est_var_p - est_var_i - true_var['e'] / N_r)
+X_pr = X.mean(axis=1)  # average over items
+est_var_pr = max(0, X_pr.var() - est_var_p - est_var_r - true_var['e'] / N_i)
+est_var_e = max(0.01, X.var() - est_var_p - est_var_i - est_var_r
+                - est_var_pi - est_var_pr)
+
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+# Panel 1: Variance components
+comp_names = ['Model\n(signal)', 'Item', 'Rater', 'Model×\nItem', 'Model×\nRater', 'Residual']
+true_vals = [true_var['p'], true_var['i'], true_var['r'],
+             true_var['pi'], true_var['pr'], true_var['e']]
+colors = ['#2ca02c', '#1f77b4', '#d62728', '#ff7f0e', '#9467bd', '#8c564b']
+bars = axes[0].bar(comp_names, true_vals, color=colors, alpha=0.8)
+axes[0].set_ylabel('Variance')
+axes[0].set_title('Variance Components')
+axes[0].grid(True, alpha=0.3, axis='y')
+axes[0].tick_params(axis='x', rotation=30)
+
+# Panel 2: D-study surface
+n_items_range = np.arange(5, 51, 5)
+n_raters_range = np.arange(1, 11)
+
+G_matrix = np.zeros((len(n_raters_range), len(n_items_range)))
+for ii, ni in enumerate(n_items_range):
+    for ri, nr in enumerate(n_raters_range):
+        rel_error = (true_var['pi'] / ni + true_var['pr'] / nr
+                     + true_var['e'] / (ni * nr))
+        G_matrix[ri, ii] = true_var['p'] / (true_var['p'] + rel_error)
+
+im = axes[1].contourf(n_items_range, n_raters_range, G_matrix,
+                       levels=np.arange(0.5, 1.01, 0.05), cmap='RdYlGn')
+axes[1].contour(n_items_range, n_raters_range, G_matrix,
+                levels=[0.80, 0.90], colors='black', linewidths=1.5)
+axes[1].set_xlabel('Number of Items')
+axes[1].set_ylabel('Number of Raters')
+axes[1].set_title('G-Coefficient (D-Study)')
+plt.colorbar(im, ax=axes[1], shrink=0.8)
+
+# Panel 3: Cost-optimal designs
+cost_item = 1.0   # cost per item (e.g., API call)
+cost_rater = 5.0  # cost per rater (e.g., annotation)
+
+budgets = np.arange(50, 501, 10)
+optimal_G = []
+optimal_ni = []
+optimal_nr = []
+
+for budget in budgets:
+    best_G = 0
+    best_ni, best_nr = 5, 1
+    for ni in range(5, int(budget / cost_item) + 1):
+        remaining = budget - ni * cost_item
+        nr = max(1, int(remaining / (ni * cost_rater)))
+        if nr < 1:
+            continue
+        total_cost = ni * cost_item + ni * nr * cost_rater
+        if total_cost > budget:
+            nr = max(1, nr - 1)
+        rel_error = (true_var['pi'] / ni + true_var['pr'] / nr
+                     + true_var['e'] / (ni * nr))
+        G = true_var['p'] / (true_var['p'] + rel_error)
+        if G > best_G:
+            best_G = G
+            best_ni, best_nr = ni, nr
+    optimal_G.append(best_G)
+    optimal_ni.append(best_ni)
+    optimal_nr.append(best_nr)
+
+axes[2].plot(budgets, optimal_G, 'steelblue', linewidth=1.5)
+axes[2].axhline(0.90, color='red', linestyle='--', linewidth=1, label='G = 0.90')
+axes[2].set_xlabel('Budget')
+axes[2].set_ylabel('Optimal G-Coefficient')
+axes[2].set_title('Cost-Optimal Design')
+axes[2].legend(fontsize=7)
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+# Find minimum budget for G >= 0.90
+for b, g in zip(budgets, optimal_G):
+    if g >= 0.90:
+        print(f"Minimum budget for G ≥ 0.90: {b} (items={optimal_ni[list(budgets).index(b)]}, "
+              f"raters={optimal_nr[list(budgets).index(b)]})")
+        break
+```
+
+
+## LLM 作为评委的可靠性 {#sec-llm-judge}
+
+### 自动评分的兴起 {#sec-automated-scoring}
+
+随着人工智能系统越来越多地在开放式任务（摘要、创意写作、指令遵循、安全性）上接受评估，人工标注成为瓶颈。LLM 现在被广泛用作评委，根据基于评分标准的准则为模型输出打分，或进行成对偏好判断 [@zheng2023judging]。这创造了一种新的测量工具，我们必须理解其可靠性属性。
+
+在 G 理论框架中，LLM 评委就是一个*评分者*。它有自己的偏差（$\gamma_r$），与不同模型的交互方式各异（$\alpha\gamma_{pr}$），并且当有随机性时（如果 temperature $> 0$），可能会在不同的调用中对相同的输出给出不同的分数。上一节中的可靠性分析直接适用，此时 LLM 评委扮演人类标注员的角色。
+
+### 评分者间一致性 {#sec-human-llm-agreement}
+
+以下三个问题刻画了 LLM 作为评委的可靠性：
+
+1. **评委间信度：** 不同的 LLM 评委之间是否一致？如果 GPT-4、Claude 和 Gemini 都评判相同的输出，它们是否会产生相同的排序？
+
+2. **人机一致性：** LLM 评委是否与人类标注员一致？高一致性表明 LLM 捕捉到了人类偏好；低一致性则意味着 LLM 测量了不同的内容。
+
+3. **评委内稳定性：** 同一个 LLM 评委在两次提问中是否给出相同的分数？在 temperature 为 0 时这应该是确定性的，但提示词顺序效应和其他不稳定因素可能引入变异性。
+
+### 位置偏差与系统误差 {#sec-position-bias}
+
+LLM 评委表现出位置偏差：在成对比较中，它们倾向于偏好先呈现（或后呈现，取决于模型）的回复 [@wang2023large]。这是一种*系统性*误差，而非随机噪声。
+
+::: {.callout-important title="系统误差 vs. 随机误差"}
+CTT 的误差项 $E$ 捕捉的是*随机*误差：均值为零，在不同场合间不相关。*系统性*误差——如位置偏差，或一个总是偏好更长回复的评委——会抬高真分数，而非误差项。一个有偏见的评委可能具有很高的信度（其偏差是稳定的），但却无效。
+
+信度分析检测随机误差。检测系统误差需要使用 @sec-validity 中的效度工具。两个 LLM 评委之间高的评分者间一致性并不意味着它们是正确的——它们可能共享相同的系统偏差。
+:::
+
+### 设计可靠的评判协议 {#sec-judge-design}
+
+基于信度框架，提高 LLM 作为评委可靠性的实用策略包括：
+
+1. **多位评委与聚合。** 使用 $n_r > 1$ 位评委，并采用多数投票或平均分数，可将误差方差降低至 $1/n_r$（G 理论的 D 研究）。三位独立评委远比一位可靠。
+
+2. **位置随机化。** 以两种顺序呈现回答，并平均评判结果。这消除了位置偏差，将系统性误差转化为互抵的噪声。
+
+3. **确定性评分。** 使用温度 0 以消除采样的随机性。这完全去除了 $\sigma^2_E$ 的一个来源。
+
+4. **评分标准具体化。** 模糊的评分标准，如“哪个回答更好？”，比具体的标准，如“哪个回答正确地遵循了指令并提供了准确信息？”，更容易产生分歧。具体的评分标准能降低 $\sigma^2_r$ 和 $\sigma^2_{ir}$。
+
+5. **基于黄金标准校准。** 在部署 LLM 评判器之前，用校准集衡量其与人工标注的一致性。这样可估计系统偏差（而不仅仅是随机误差）。
+
+```{pyodide-python}
+#| label: llm-judge-reliability
+#| autorun: true
+#| fig-cap: "左图：模拟LLM裁判的裁判间一致性矩阵（Cohen's kappa）。中图：准确率随着更多裁判的多数投票而提高。右图：位置偏差是一种系统误差，会降低有效性但不影响可靠性。"
+
+np.random.seed(42)
+
+N_pairs = 200  # pairwise comparisons
+N_judges = 5
+
+# True quality differences (positive = first response is better)
+true_diff = np.random.normal(0, 1, N_pairs)
+true_labels = (true_diff > 0).astype(int)
+
+# Simulate judges with different quality levels and biases
+judge_quality = [0.85, 0.80, 0.75, 0.78, 0.72]  # P(correct)
+judge_bias = [0.0, 0.05, -0.05, 0.10, -0.03]     # position bias
+
+judgments = np.zeros((N_judges, N_pairs), dtype=int)
+for j in range(N_judges):
+    # Each judge: correct with probability quality, plus position bias
+    p_correct = judge_quality[j]
+    for k in range(N_pairs):
+        if np.random.rand() < p_correct:
+            judgments[j, k] = true_labels[k]
+        else:
+            judgments[j, k] = 1 - true_labels[k]
+        # Position bias: tendency to choose first response
+        if np.random.rand() < abs(judge_bias[j]):
+            judgments[j, k] = 1 if judge_bias[j] > 0 else 0
+
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+# Panel 1: Inter-judge kappa matrix
+kappa_matrix = np.zeros((N_judges, N_judges))
+for j1 in range(N_judges):
+    for j2 in range(N_judges):
+        if j1 == j2:
+            kappa_matrix[j1, j2] = 1.0
+        else:
+            # Compute Cohen's kappa
+            p_o = np.mean(judgments[j1] == judgments[j2])
+            p1_yes = judgments[j1].mean()
+            p2_yes = judgments[j2].mean()
+            p_e = p1_yes * p2_yes + (1 - p1_yes) * (1 - p2_yes)
+            kappa_matrix[j1, j2] = (p_o - p_e) / (1 - p_e) if p_e < 1 else 0
+
+im = axes[0].imshow(kappa_matrix, cmap='RdYlGn', vmin=0, vmax=1)
+axes[0].set_xticks(range(N_judges))
+axes[0].set_yticks(range(N_judges))
+axes[0].set_xticklabels([f'J{i+1}' for i in range(N_judges)])
+axes[0].set_yticklabels([f'J{i+1}' for i in range(N_judges)])
+axes[0].set_title("Inter-Judge κ")
+for i in range(N_judges):
+    for j in range(N_judges):
+        axes[0].text(j, i, f'{kappa_matrix[i,j]:.2f}', ha='center', va='center', fontsize=6)
+plt.colorbar(im, ax=axes[0], shrink=0.8)
+
+# Panel 2: Accuracy vs number of judges (majority vote)
+judge_counts = range(1, N_judges + 1)
+accuracies = []
+for n_j in judge_counts:
+    # Average over many random subsets of judges
+    acc_samples = []
+    for _ in range(100):
+        subset = np.random.choice(N_judges, n_j, replace=False)
+        majority = (judgments[subset].mean(axis=0) > 0.5).astype(int)
+        acc_samples.append(np.mean(majority == true_labels))
+    accuracies.append(np.mean(acc_samples))
+
+axes[1].plot(list(judge_counts), accuracies, 'o-', color='steelblue',
+             linewidth=1.5, markersize=5)
+axes[1].set_xlabel('Number of Judges')
+axes[1].set_ylabel('Accuracy')
+axes[1].set_title('Majority Vote Accuracy')
+axes[1].grid(True, alpha=0.3)
+axes[1].set_xticks(list(judge_counts))
+
+# Panel 3: Effect of position bias on accuracy
+bias_levels = np.linspace(0, 0.3, 20)
+acc_with_bias = []
+acc_debiased = []
+
+for bias in bias_levels:
+    # Single judge with varying bias
+    correct = np.zeros(N_pairs)
+    biased = np.zeros(N_pairs)
+    for k in range(N_pairs):
+        # Without debiasing
+        if np.random.rand() < 0.80:
+            pred = true_labels[k]
+        else:
+            pred = 1 - true_labels[k]
+        if np.random.rand() < bias:
+            pred = 1  # always pick first
+        biased[k] = pred
+
+        # With debiasing (average both orders)
+        pred1, pred2 = pred, pred
+        if np.random.rand() < bias:
+            pred2 = 0  # reversed order: pick "first" = second
+        correct[k] = round((pred1 + (1 - pred2)) / 2)
+
+    acc_with_bias.append(np.mean(biased == true_labels))
+    acc_debiased.append(np.mean(correct == true_labels))
+
+axes[2].plot(bias_levels, acc_with_bias, 'r-', linewidth=1.5, label='With bias')
+axes[2].plot(bias_levels, acc_debiased, 'g-', linewidth=1.5, label='Debiased')
+axes[2].set_xlabel('Position Bias Strength')
+axes[2].set_ylabel('Accuracy')
+axes[2].set_title('Position Bias Effect')
+axes[2].legend(fontsize=7)
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+
+mean_kappa = kappa_matrix[np.triu_indices(N_judges, k=1)].mean()
+print(f"Mean inter-judge κ: {mean_kappa:.3f}")
+print(f"Single judge accuracy: {accuracies[0]:.3f}")
+print(f"5-judge majority accuracy: {accuracies[-1]:.3f}")
+```
+
+
+## IRT下的信度 {#sec-irt-reliability}
+
+### 条件信度 {#sec-conditional-reliability}
+
+经典测验理论（CTT）为整个测验提供一个单一的信度数值。但根据@sec-foundations 和@sec-efficient，我们知道测量精度在能力范围内是变化的。为中等水平模型设计的基准测试可能在$\theta = 0$处信度很高，但在极端处信度较低。
+
+在项目反应理论（IRT）下，能力$\theta$处的测量精度由测验信息函数（在@sec-fisher-design 中介绍）给出：
+
+$$
+I(\theta) = \sum_{j=1}^M P_j(\theta)(1 - P_j(\theta))
+$$
+
+在$\theta$处的*条件信度*为：
+
+$$
+\rho(\theta) = 1 - \frac{1}{I(\theta) \cdot \sigma^2_\theta}
+$$
+
+其中$\sigma^2_\theta$是总体中能力的方差。这个公式阐明了一个关键点：信度不是测验的固定属性——它取决于你在能力范围内的*哪个位置*进行测量，以及总体的*分散程度*。
+
+### IRT下的斯皮尔曼-布朗预测公式 {#sec-spearman-brown-irt}
+
+经典斯皮尔曼-布朗公式（@eq-spearman-brown）表明信度随测验长度增加而提高。在IRT下，当题目与目标能力范围匹配良好时，这一结论近似成立，但当题目匹配不佳时则不再成立。
+
+向一个已有50道难题的基准测试中再添加50道简单题目，对于高能力模型而言，对信度的提升微乎其微——简单题目在该范围内几乎不提供任何信息。这恰恰是自适应测验（@sec-cat）背后的洞见：通过选择与每个模型能力相匹配的题目，计算机化自适应测验（CAT）能用更少的题目达到相同的信度。
+
+```{pyodide-python}
+#| label: conditional-reliability
+#| autorun: true
+#| fig-cap: "左图：不同题库设计的测验信息函数。中图：条件信度随能力范围变化。右图：自适应测验在所有能力水平上用更少的题目达到目标信度。"
+
+np.random.seed(42)
+
+theta_grid = np.linspace(-3, 3, 200)
+sigma_theta = 1.0  # population SD
+
+# Three item pool designs
+M = 30
+# Design 1: Uniform spread
+beta_uniform = np.linspace(-2, 2, M)
+# Design 2: Concentrated at center
+beta_center = np.random.normal(0, 0.5, M)
+# Design 3: Concentrated at extremes (bimodal)
+beta_extreme = np.concatenate([np.random.normal(-1.5, 0.3, M//2),
+                                np.random.normal(1.5, 0.3, M//2)])
+
+def test_info(theta_grid, betas):
+    info = np.zeros_like(theta_grid)
+    for b in betas:
+        P = sigmoid(theta_grid - b)
+        info += P * (1 - P)
+    return info
+
+def cond_reliability(info, sigma_sq):
+    return 1 - 1 / (info * sigma_sq + 1e-10)
+
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+# Panel 1: Test information functions
+designs = [('Uniform', beta_uniform, '#2ca02c'),
+           ('Centered', beta_center, '#1f77b4'),
+           ('Extreme', beta_extreme, '#d62728')]
+
+for name, betas, color in designs:
+    info = test_info(theta_grid, betas)
+    axes[0].plot(theta_grid, info, color=color, linewidth=1.5, label=name)
+
+axes[0].set_xlabel('Ability (θ)')
+axes[0].set_ylabel('Test Information')
+axes[0].set_title('Test Information Function')
+axes[0].legend(fontsize=7)
+axes[0].grid(True, alpha=0.3)
+
+# Panel 2: Conditional reliability
+for name, betas, color in designs:
+    info = test_info(theta_grid, betas)
+    rho = np.clip(cond_reliability(info, sigma_theta**2), 0, 1)
+    axes[1].plot(theta_grid, rho, color=color, linewidth=1.5, label=name)
+
+axes[1].axhline(0.90, color='black', linestyle='--', linewidth=1, alpha=0.5)
+axes[1].set_xlabel('Ability (θ)')
+axes[1].set_ylabel('Conditional Reliability')
+axes[1].set_title('Reliability Across Ability')
+axes[1].legend(fontsize=7)
+axes[1].grid(True, alpha=0.3)
+axes[1].set_ylim(0, 1)
+
+# Panel 3: Items needed to reach target reliability
+target_rho = 0.90
+theta_test_points = np.linspace(-2.5, 2.5, 50)
+
+items_needed_uniform = []
+items_needed_adaptive = []
+
+for theta_t in theta_test_points:
+    # Uniform: add items from uniform pool one at a time
+    betas_sorted = sorted(beta_uniform, key=lambda b: abs(b - theta_t))
+    for k in range(1, M + 1):
+        info = sum(sigmoid(theta_t - b) * (1 - sigmoid(theta_t - b)) for b in betas_sorted[:k])
+        rho = 1 - 1 / (info * sigma_theta**2 + 1e-10)
+        if rho >= target_rho:
+            items_needed_uniform.append(k)
+            break
+    else:
+        items_needed_uniform.append(M)
+
+    # Adaptive: always pick item closest to theta
+    all_betas = np.random.normal(0, 1.5, 100)
+    betas_adapt = sorted(all_betas, key=lambda b: abs(b - theta_t))
+    for k in range(1, len(betas_adapt) + 1):
+        info = sum(sigmoid(theta_t - b) * (1 - sigmoid(theta_t - b)) for b in betas_adapt[:k])
+        rho = 1 - 1 / (info * sigma_theta**2 + 1e-10)
+        if rho >= target_rho:
+            items_needed_adaptive.append(k)
+            break
+    else:
+        items_needed_adaptive.append(len(betas_adapt))
+
+axes[2].plot(theta_test_points, items_needed_uniform, color='#1f77b4',
+             linewidth=1.5, label='Fixed (uniform)')
+axes[2].plot(theta_test_points, items_needed_adaptive, color='#2ca02c',
+             linewidth=1.5, label='Adaptive')
+axes[2].set_xlabel('Ability (θ)')
+axes[2].set_ylabel('Items Needed')
+axes[2].set_title(f'Items for ρ ≥ {target_rho}')
+axes[2].legend(fontsize=7)
+axes[2].grid(True, alpha=0.3)
+
+plt.tight_layout()
+plt.show()
+```
+
+实际启示很明确：单一的信度数值可能具有误导性。一个基准测试可能报告总体 $\alpha = 0.92$，但对于最重要的前沿模型，其条件信度却低于 0.80——因为所有项目对它们来说都太容易了。IRT 框架提供了诊断和修复这一问题的工具，并直接连接到 @sec-efficient 中的高效测量方法。
+
+
+## 设计可靠的人工智能评估 {#sec-reliable-design}
+
+本章发展的理论为 AI 评估提供了具体的设计原则：
+
+1. **了解你的主要噪声源。** 在确定评估设计之前进行 G 研究（Generalizability Study）。如果标注者变异占主导，则增加评分者或使用更清晰的评分标准。如果项目抽样变异占主导，则使用更多项目或 D-最优项目选择。
+
+2. **将项目与感兴趣的能力范围相匹配。** 条件信度表明测量精度随能力水平变化。如果目标是对前沿模型进行排名，基准测试需要难度足够大的项目来区分它们。
+
+3. **当评分具有主观性时，使用多位评审。** 概化理论的 D 研究（Decision Study）量化了增加评审带来的改进。三位独立评审者通过多数表决的方式，比单个评审者可靠得多，且通常比增加更多项目更具成本效益。
+
+4. **报告置信区间，而非仅点估计。** SEM（测量标准误）提供了自然的误差带。两个模型的得分在 $\pm 2 \times \text{SEM}$ 范围内重叠，可能没有实质性差异。排行榜应表明哪些排名差异在统计上是可靠的。
+
+5. **控制你能控制的。** 使用温度 0 进行确定性评分。随机化提示格式并对其求平均。标准化评分标准。这些措施消除了 $\sigma^2_E$ 的来源，而不是对它们进行平均。
+
+6. **将信度与效度分开。** 高信度是必要的，但并不充分。一个基准测试可能信度很高，却系统性地测量了错误的东西（污染、捷径特征、长度偏差）。检测这些问题的工具在 @sec-validity 中。
+
+7. **使用可靠性诊断审计题目。** 个别题目可能降低整体信度。具有负题总相关的题目会*降低*克隆巴赫α系数——删除它们则可提高信度。@truong2025bugs 证明，这一经典题目分析原则是发现基准缺陷的有力工具：具有负四分相关或低Mokken标度系数的题目往往存在错误答案、含糊措辞或评分错误。在九个基准上，基于信度的标记在前50个被标记题目中达到了高达84%的精确率。其直觉很简单：在Rasch模型（或任何单维模型）下，所有题目应彼此正相关并与总分正相关。违反即表明这些题目测量了与基准其余部分不同的东西——无论是因为多维性还是完全错误。
+
+
+## 讨论问题 {#sec-reliability-discussion}
+
+1. **决定论与信度。** 在温度为0时，语言模型每次都会给出相同的输出。这是否意味着评估具有完美的重测信度？即使在确定性模型下，还有哪些不可靠来源？
+
+2. **信度与题目数量。** 斯皮尔曼-布朗公式预测，更长的测试信度更高。AI基准通常包含数千道题目——远超典型的教育测试。这是否意味着AI基准自动具有高信度？哪些假设可能被违反？
+
+3. **LLM作为评判的权衡。** 使用GPT-4作为评判比人工标注更便宜，但会引入模型特有的偏见。在什么条件下，你会偏好一个准确性较低但更可靠的评判？G理论如何帮助形式化这一权衡？
+
+4. **跨模型世代信度。** 当新一代模型发布时，现有基准的信度可能发生变化（因为题目难度相对于模型能力发生偏移）。基准开发者应如何随时间监控和维持信度？
+
+5. **信度-效度张力。** 一个由1000道相同简单问题的副本组成的基准将具有极高的内部一致性，但效度近乎为零。这个病态例子如何说明信度与效度之间的区别？哪些设计原则可防止这种情况？
+
+6. **题目级诊断与基准维护。** @truong2025bugs 发现，删除题总相关为负的题目可同时提高AI基准的信度和效度。但删除题目也会缩短测试，而斯皮尔曼-布朗公式预测这将*降低*信度。在什么条件下，删除题目的净效应会提高信度？你将如何设计一个迭代题目筛选程序，以平衡这些竞争压力？
+
+
+## 文献注释 {#sec-reliability-bib}
+
+### 经典测验理论
+
+基础参考文献是 @lord1968statistical，它公理化地建立了经典测试理论（CTT）。@cronbach1951coefficient 引入了 α 系数，这是最广泛使用的信度统计量。斯皮尔曼-布朗公式可分别追溯至 Spearman（1910）和 Brown（1910）。关于 CTT 与基于项目反应理论（IRT）的信度之间的联系，请参见 @hambleton1985irt 的第 7 章。
+
+### 概化理论
+
+G 理论由 @cronbach1972dependability 提出，是在 Cronbach 关于测量误差多种来源的早期工作基础上发展起来的。@brennan2001generalizability 提供了全面的现代论述。@shavelson1991generalizability 则是一本易于理解的入门读物。G 理论与混合效应模型之间的联系，使得现代软件（例如 R 中的 `lme4`）可直接应用于 G 研究。
+
+### 评分者间信度
+
+@cohen1960coefficient 引入了 Cohen 的 kappa 系数。@fleiss1971measuring 将其扩展到多个评分者的情况。@krippendorff2011computing 提出了 Krippendorff 的 alpha 系数，能够处理缺失数据、等级量表和任意数量的评分者。欲了解全面论述及实用指南，请参见 @gwet2014handbook。
+
+### LLM 作为评判者
+
+@zheng2023judging 引入了 LLM 作为评判者（LLM-as-a-judge）范式以及 MT-Bench 评估框架。@wang2023large 记录了位置偏差。@shankar2024validates 探讨了如何根据人类偏好来验证 LLM 评判者。关于评估中的提示敏感性，请参见 @mizrahi2024state。@biderman2024lessons 更广泛地讨论了语言模型评估中的可复现性挑战。
+
+### 题目级信度诊断
+
+经典的项目分析——计算项目与总分的相关、项目间相关及 Mokken 量表可扩展性系数，以识别不拟合的项目——是教育测验开发中的一个标准步骤。@truong2025bugs 将这些技术大规模应用于 AI 基准测试，结果显示，被负四分相关或低可扩展性系数标记的项目，经常包含真正的错误（如标准答案错误、歧义表述、评分缺陷）。其框架基于 Rasch 模型的充分性属性（@sec-sufficiency）：如果总分是能力的充分统计量，那么所有项目间相关必须非负，这使得违反此性质的情况成为一种原则性的诊断信号。他们建议至少使用来自 10 个机构的 60--80 个 LLM 进行评估，以实现可靠的检测。
+
+
+## 练习 {#sec-reliability-exercises}
+
+### 理论练习
+
+**练习 4.1** ($\star$)：从经典测试理论模型 $X = T + E$ 出发，并结合标准假设（$\mathbb{E}[E] = 0$，$\text{Cov}(T, E) = 0$），推导出 $\rho_{XX'} = \sigma^2_T / \sigma^2_X$。证明信度等于观测分数与真分数之间相关的平方：$\rho_{XX'} = r^2_{XT}$。
+
+**练习 4.2**（$\star\star$）：推导斯皮尔曼-布朗预言公式。若一个长度为 $M$ 的测验的信度为 $\rho$，证明一个长度为 $KM$（由 $K$ 个平行复本组成）的测验的信度为 $\rho_K = K\rho / (1 + (K-1)\rho)$。当 $K \to \infty$ 时，会发生什么？
+
+**练习 4.3**（$\star\star$）：在概化理论 $p \times i \times r$ 设计中，推导概化系数 $G$ 的公式。证明增加 $n_r$ 会减小评分者方差的贡献，但不会减小题目方差的贡献，反之亦然。
+
+**练习 4.4**（$\star\star$）：证明克隆巴赫 $\alpha$ 系数是一个包含 $M$ 个题目的测验的所有可能分半信度（经斯皮尔曼-布朗校正后）的均值。在什么条件下，$\alpha$ 是信度的下限？
+
+### 计算练习
+
+**练习 4.5**（$\star\star$）：为模型 $\times$ 题目 $\times$ 评分者设计实现一项 G 研究。给定一个三维数据数组 $X[p, i, r]$，使用期望均方估计所有方差分量。将你的实现应用于模拟数据，并验证估计值能否恢复真实的方差分量。
+
+**练习 4.6**（$\star\star$）：模拟一个以 LLM 作为裁判的评估，其中有 5 位不同质量的裁判（与金标准的一致性从 0.70 到 0.90 不等）。计算：(a) 所有裁判对之间的配对科恩 $\kappa$ 系数，(b) 分别使用 1、3、5 位裁判时，多数投票的准确率。如果所有裁判共享相同的系统偏差（例如，偏好较长的回答），信度会如何变化？
+
+**练习 4.7**（$\star\star\star$）：实现一个 D 研究优化器。给定方差分量、每题成本（$c_i$）和每评分者-题目对成本（$c_r$），找到能达到 $G \geq G^*$ 的最便宜的评估设计 $(n_i, n_r)$。将此视为一个约束优化问题来求解，并可视化成本曲面。
+
+### 讨论练习
+
+**练习 4.8**：Chatbot Arena 每次比较仅使用单个人类偏好判断。运用概化理论，分析由此设计得到的 Elo 评分的信度。要达到 $G \geq 0.90$，每对模型需要多少次比较？这会带来怎样的成本影响？
+
+**练习 4.9**（$\star\star$）：实现 @truong2025bugs 中的题目级诊断流水线。模拟一个包含 $N = 80$ 个模型和 $M = 200$ 个题目的拉希基准。引入 20 个“有缺陷的”题目：10 个答案键翻转（将 $Y_{ij}$ 替换为 $1 - Y_{ij}$），10 个随机作答（与 $\theta$ 无关）。计算：(a) 题总相关，(b) 平均四分相关系数，以及 (c) 所有题目的莫肯可伸缩性系数 $H_j$。分别按各统计量对题目排序。每种方法的前 20 精确率和前 20 召回率是多少？当 LLM 的数量从 10 变化到 100 时，性能如何变化？

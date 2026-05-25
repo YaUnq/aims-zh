@@ -1,0 +1,888 @@
+﻿---
+format:
+  html:
+    include-after-body:
+      text: |
+        <script>
+        // Auto-execute all pyodide cells after initialization
+        document.addEventListener('DOMContentLoaded', function() {
+          function waitForPyodide() {
+            if (typeof globalThis.mainPyodide !== 'undefined' && globalThis.mainPyodide) {
+              if (typeof globalThis.qpyodideCellDetails !== 'undefined') {
+                globalThis.qpyodideCellDetails.forEach((cell, index) => {
+                  if (cell.options && cell.options.autorun === 'true') {
+                    setTimeout(() => {
+                      const runButton = document.querySelector(`#qpyodide-button-run-${cell.id}`);
+                      if (runButton && !runButton.disabled) {
+                        runButton.click();
+                      }
+                    }, index * 1000);
+                  }
+                });
+              }
+            } else {
+              setTimeout(waitForPyodide, 500);
+            }
+          }
+          setTimeout(waitForPyodide, 2000);
+        });
+        </script>
+filters:
+  - pyodide
+pyodide:
+  packages:
+    - numpy
+    - matplotlib
+    - scipy
+---
+
+# 因果性与分布偏移 {#sec-causality}
+
+::: {.callout-note title="预期学习成果"}
+学完本章后，你将能够：
+
+1.  **构建**AI 评估的因果模型，并区分关于基准性能的因果性声明与关联性声明。
+2.  **应用**结构因果模型 (SCM) 表示评估数据背后的数据生成过程，包括训练数据、模型架构和基准设计的作用。
+3.  **识别**分布偏移——在训练、校准和部署群体之间——何时威胁评估结论的有效性，并描述偏移类型（协变量、标签、概念）。
+4.  **使用**干预性和反事实推理诊断构念无关方差：基准分数的变化是因为能力改变，还是因为其他因素改变了？
+5.  **解释**Borsboom 的因果效度理论与现代因果推断之间的联系：一个基准有效，当且仅当目标构念因果地产生分数变异。
+6.  **应用**双重稳健估计来纠正自适应和非代表性评估中的选择偏差，将重要性加权、基于模型的插补以及预测驱动的推断联系起来。
+7.  **评估**基准结果何时可以在不同部署环境中泛化，何时不可以，使用可迁移性准则和共形推断。
+:::
+
+::: {.callout-tip title="建议的授课计划" collapse="true"}
+本章内容可用 **3 次课**（每次 75-90 分钟）覆盖：
+
+**第 1 课：评估的因果模型**
+
+- 从基准分数中的相关到因果 (20 分钟)
+- 结构因果模型与评估 DAG (25 分钟)
+- 干预推理：诊断污染与构念无关方差 (20 分钟)
+- 重访 Borsboom 的因果效度 (10 分钟)
+
+**第 2 课：分布偏移与可迁移性**
+
+- 分布偏移的类型：协变量、标签、概念 (20 分钟)
+- 基准结果何时泛化？可迁移性 (25 分钟)
+- 将评估视为赌博机的框架 (20 分钟)
+- 动手实践：偏移可视化 (10 分钟)
+
+**第 3 课：稳健估计与共形预测**
+
+- 三种估计量：DM、IPW、双重稳健 (25 分钟)
+- 与预测驱动推断的联系 (15 分钟)
+- 分布偏移下的共形预测 (20 分钟)
+- 动手实践：双重稳健估计与加权共形 (15 分钟)
+:::
+
+::: {.callout-note title="符号说明"}
+本章引入因果性和分布性符号：$\text{do}(X=x)$（干预）、$P^{(s)}/P^{(t)}$（源分布/目标分布）、$\pi_0/\pi$（记录策略/目标策略）、$w(x)$（重要性权重）、$\hat{V}_{\text{DR}}$（双重稳健估计量）以及 $C_\alpha(x)$（共形预测集）。完整的符号参考见[符号附录](notation.qmd)。
+:::
+
+## 从基准分数中的关联到因果 {#sec-association-causation}
+
+模型A在一个流行的推理基准测试上优于模型B。我们能得出什么结论？关联是明确的：$\mathbb{E}[Y \mid \text{Model} = A] > \mathbb{E}[Y \mid \text{Model} = B]$。但这是否意味着模型A具有更强的推理能力？还是说模型A的训练数据恰好包含了与基准测试题目相似的问题，从而获得了与推理无关的记忆优势？
+
+这种关联主张与因果主张之间的区别是本章的核心关注点。在 @sec-foundations 中，我们介绍了Borsboom关于效度的现实主义定义：一个测验对于测量某种属性是有效的，当且仅当（a）该属性存在，且（b）该属性的变化 *因果地产生* 测验分数的变化 [@borsboom2005measuring]。在 @sec-validity 中，我们通过内容效度、效标效度、构念效度、外部效度和后果效度，阐述了这一定义的实际含义。本章将提供 *形式化的因果机制* 来使这些概念精确化。
+
+### 因果层级 {#sec-causal-hierarchy}
+
+@pearl2009causality 区分了因果推理的三个层级，每一层都需要逐步增强的假设：
+
+1. **关联** $P(Y \mid X)$：观察到 $X$ 能告诉我们关于 $Y$ 的什么信息？*示例：*“参数更多的模型往往在MMLU上得分更高。”这是一种可能由多种因果结构产生的相关性。
+
+2. **干预** $P(Y \mid \text{do}(X = x))$：如果我们 *设定* $X$ 的值为 $x$，不考虑自然发生的情况，$Y$ 会发生什么变化？*示例：*“如果我们将上下文窗口从4K tokens增加到128K tokens，推理得分会提高吗？”这需要了解因果结构，而不仅仅是联合分布。
+
+3. **反事实** $P(Y_x \mid X = x')$：在实际上观察到 $X = x'$ 的情况下，如果 $X$ 曾经是 $x$，$Y$ *会* 发生什么？*示例：*“如果该模型的训练数据中没有包含基准测试的源文档，它在该基准上的得分会降低吗？”反事实推理针对的是个体案例，而非总体。
+
+大多数基准分析都在第1层级运作。排行榜报告的是 $P(Y \mid \text{Model})$——模型身份与得分之间的关联。但我们想要做出的主张是在第2或第3层级：“该模型 *具有更好的推理能力*”是一个关于什么产生了该得分的因果主张。
+
+### 结构因果模型 {#sec-scm}
+
+**结构因果模型** (SCM) 为因果推理提供了形式化语言 [@pearl2009causality]。
+
+::: {.callout-note title="定义：结构因果模型"}
+一个SCM是一个元组 $\mathcal{M} = (U, V, F, P(U))$，其中：
+
+- $U$ 是外生（背景）变量集合
+- $V = \{V_1, \ldots, V_n\}$ 是内生变量集合
+- $F = \{f_1, \ldots, f_n\}$ 是结构方程集合，$V_i = f_i(\text{pa}(V_i), U_i)$，其中 $\text{pa}(V_i) \subseteq V \setminus \{V_i\}$
+- $P(U)$ 是外生变量上的分布
+
+每个SCM都会诱导出一个有向无环图（DAG），其中边从$\text{pa}(V_i)$指向$V_i$。该DAG编码了条件独立性结构：如果$S$在该DAG中*d-分离*$V_i$和$V_j$，则$V_i \perp\!\!\!\perp V_j \mid S$。
+:::
+
+### 评估DAG {#sec-evaluation-dag}
+
+我们现在为AI评估过程构建一个SCM。关键的内生变量包括：
+
+- $D$：**训练数据**（语料库构成、规模、质量）
+- $A$：**架构**（Transformer变体、参数量、训练方案）
+- $\theta$：**潜在能力**（基准测验声称要测量的构念）
+- $B$：**基准设计**（题库、选题标准、格式）
+- $\beta$：**题目属性**（难度、区分度、内容）
+- $F$：**格式设置**（提示模板、少样本示例、系统提示）
+- $Y$：**观测得分**（基准测验结果）
+
+因果结构为：
+
+$$
+D \to \theta, \quad A \to \theta, \quad \theta \to Y, \quad \beta \to Y, \quad B \to \beta, \quad F \to Y
+$$
+
+当基准测验在Borsboom的意义上*有效*时，从$D$和$A$到$Y$的主要路径会经过$\theta$：训练数据和架构决定能力，而能力决定得分。题目属性$\beta$调节这种关系（相同能力水平下，更难的题目会产生更低的得分），但不会对其造成混杂。
+
+**效度威胁作为DAG病理学。**@sec-validity-threats 中所识别的威胁对应于特定的DAG结构：
+
+- **污染**（@sec-contamination）：一条绕过$\theta$的直接路径$D \to Y$。模型的训练数据中包含了基准题目，因此得分反映的是记忆而非能力。这是一条*混杂*路径，它夸大了$\theta$与$Y$之间的观测关联。
+- **构念无关变异**（@sec-civ）：一条不经过$\theta$的路径$F \to Y$。提示格式独立于能力影响得分。这是$Y$的一个额外原因，不属于目标构念。
+- **题目功能差异**（@sec-dif-theory）：一种不由$\theta$中介的$A \to Y$交互作用。某些架构在特定题目上具有优势，与它们的能力水平无关。
+
+::: {.callout-important title="效度 = 无畅通后门路径"}
+在Borsboom的因果框架下，当且仅当从数据生成过程到观测得分的*唯一*系统性路径经过目标构念$\theta$时，基准测验才是有效的。每一条非$\theta$的畅通路径都是效度威胁。@sec-validity-diagnostics 中的诊断工具——DIF分析、维度评估、题目拟合统计量——就是检验此类路径是否存在的经验性测试。
+:::
+
+
+## 干预与反事实诊断 {#sec-interventional-diagnostics}
+
+通过@sec-evaluation-dag 中的评估DAG，我们可以进行*干预*推理——即当我们刻意改变某个变量而固定其他变量时会发生什么。
+
+### 后门调整 {#sec-backdoor}
+
+后门准则 [@pearl2009causality] 识别了何时观测数据足以估计因果效应。相对于有序对 $(X, Y)$，变量集合 $Z$ 满足后门准则，如果：(i) $Z$ 中没有节点是 $X$ 的后代，且 (ii) $Z$ 阻断了 $X$ 与 $Y$ 之间所有包含指向 $X$ 的箭头的路径。
+
+当后门准则得到满足时：
+
+$$
+P(Y \mid \text{do}(X = x)) = \sum_z P(Y \mid X = x, Z = z) P(Z = z)
+$$ {#eq-backdoor}
+
+这个*调整公式*通过对混杂分布取平均来消除混杂。在 AI 评估中，这意味着：要估计能力 $\theta$ 对得分 $Y$ 的因果效应，我们必须针对所有混杂因素进行调整——即那些通过非 $\theta$ 路径同时影响 $\theta$ 与 $Y$ 的变量。
+
+### 诊断污染 {#sec-causal-contamination}
+
+来自 @sec-contamination 的污染诊断可以形式化为一个干预性问题。令 $D_{\text{overlap}}$ 表示与基准项目重叠的训练数据子集。因果问题是：
+
+$$
+P(Y \mid \text{do}(D_{\text{overlap}} = \emptyset)) \stackrel{?}{=} P(Y \mid D_{\text{overlap}} = \emptyset)
+$$
+
+如果它们相等，那么移除重叠数据并不会*超出*训练集缩减所带来的预期变化而改变得分。如果它们不相等，则表明重叠提供了一条直接的 $D \to Y$ 路径（死记硬背），而非对 $\theta$ 的贡献（真正的学习）。
+
+在实践中，我们无法对已训练好的模型执行这一干预。但可以通过以下方式近似：
+
+- **时序分割**：在训练数据截止日期之后创建的项目不可能被死记硬背。比较截止前与截止后项目上的得分，可以估计污染效应。
+- **金丝雀检测**：在基准项目中嵌入唯一字符串，并测试模型是否会复现它们，这为 $D \to Y$ 路径提供了证据 [@jacovi2023stop]。
+- **项目拟合分析**：来自 @sec-item-fit 的信息加权拟合/异常拟合统计量可以检测出某些模型表现异常好的项目——这是死记硬背路径的标志。
+
+### 针对 DIF 的反事实推理 {#sec-counterfactual-dif}
+
+差异项目功能（@sec-dif-theory）具有一种自然的反事实解释。一个项目 $i$ 在组 $g = 0$ 和 $g = 1$ 之间表现出 DIF，如果：
+
+$$
+P(Y_{i,g=1} = 1 \mid \theta) \neq P(Y_{i,g=0} = 1 \mid \theta)
+$$
+
+这是一个反事实陈述：“对于一个能力为 $\theta$ 的模型，假如它属于另一组而能力保持不变，那么它对项目 $i$ 的回答是否会不同？” “组”变量 $g$（例如，模型架构家族）对项目回答具有*直接*效应，该效应并非通过 $\theta$ 中介。
+
+在评估DAG下，DIF对应于一条不经过$\theta$的路径$A \to Y$——这是特定题目上的架构优势，反映了目标构念之外的因素。来自@sec-dif-analysis 的Mantel-Haenszel方法通过按$\theta$分层（以总分作为代理）来估计这种直接效应，这阻断了$A \to \theta \to Y$路径，并分离出$A \to Y$的直接效应。
+
+::: {.callout-important title="分数差异何时是因果性的？"}
+两个模型之间的分数差异$Y_A - Y_B$仅当从数据生成过程到$Y$的所有不经过$\theta$的路径都被阻断时，才反映真正的*能力*差异。AI评估中常见的未阻断路径：
+
+- **训练数据重叠**（$D \to Y$绕过$\theta$）：记忆效应抬高分数
+- **提示格式**（$F \to Y$）：格式偏好会独立于能力影响分数
+- **评估顺序**（LLM裁判中的位置偏差）：呈现顺序导致的系统性偏差
+
+本节中的因果诊断和@sec-validity-diagnostics 中的统计诊断是检测这些未阻断路径的互补方法。
+:::
+
+
+## 分布偏移与可迁移性 {#sec-shift-taxonomy}
+
+在@sec-external-validity 中，我们提出了基准结果能否推广到评估具体条件之外的问题。本节提供形式化框架。
+
+### 设置 {#sec-shift-setup}
+
+令$P^{(s)}(X, Y)$表示**源**（基准）在题目$X$和回答$Y$上的联合分布，$P^{(t)}(X, Y)$表示**目标**（部署）分布。根本问题是：在$P^{(s)}$下计算的性能估计何时在$P^{(t)}$下仍然有效？
+
+联合分布可分解为$P(X, Y) = P(Y \mid X) P(X)$，由此产生了基于哪个组成部分发生变化的偏移类型分类法。
+
+::: {.callout-note title="定义：分布偏移的类型"}
+1. **协变量偏移**：$P^{(s)}(X) \neq P^{(t)}(X)$，但$P^{(s)}(Y \mid X) = P^{(t)}(Y \mid X)$。*题目分布*发生变化，但模型的*条件行为*保持稳定。示例：基准测试过度抽样简单题目；部署中遇到更难的题目构成。
+
+2. **标签偏移**（先验概率偏移）：$P^{(s)}(Y) \neq P^{(t)}(Y)$，但$P^{(s)}(X \mid Y) = P^{(t)}(X \mid Y)$。结果的*基础发生率*发生变化。示例：基准测试中正确答案的基础发生率为50%；部署任务中为10%。
+
+3. **概念漂移**：$P^{(s)}(Y \mid X) \neq P^{(t)}(Y \mid X)$。*题目与回答之间的关系*发生变化。示例：随着编程规范的演变，编码基准测试变得过时，因此正确答案发生了变化。
+:::
+
+### AI评估中的协变量偏移 {#sec-covariate-shift}
+
+协变量偏移是最常见且最可纠正的偏移形式。在AI评估中，只要基准测试的题目池不能代表部署时的题目分布，就会出现这种情况。
+
+考虑一个旨在测量数学推理能力的基准测试。如果其题目池不成比例地来自代数（简单）而非组合数学、数论和分析（困难），那么该基准的题目分布$P^{(s)}(X)$相对于部署分布$P^{(t)}(X)$会偏向简单题目。模型在任何给定题目上的行为——其条件响应$P(Y \mid X)$——在两种情况下是相同的。但在$P^{(s)}$下计算的整体准确率会高估部署准确率，因为简单题目权重过大。
+
+这直接关联到@sec-content-validity 中关于内容效度的讨论：内容效度差（题目采样不具有代表性）的基准测试，就是相对于构念域存在协变量偏移（covariate shift）的基准测试。
+
+### 人工智能评测中的概念漂移 {#sec-concept-drift}
+
+概念漂移（concept drift）更危险，因为模型的条件行为本身会改变。在AI评测中，概念漂移发生在以下情况：
+
+- **模型更新**：模型通过RLHF、微调或系统提示更改进行更新。基于旧模型校准的IRT参数不再适用。
+- **提示模板更改**：从零样本切换到少样本模板会改变$P(Y \mid X)$，即使对于相同题目也是如此。
+- **时间演变**：编程语言演进、科学知识进步、社会规范变迁。基准测试的“正确”答案可能过时。
+
+在概念漂移下，对源分布的任何重新加权都无法恢复目标性能。必须用来自目标分布的数据重新评估模型，或者对概念漂移进行显式建模。
+
+### 可移植性 {#sec-transportability}
+
+我们何时能将因果结论从一个情境移植到另一个情境？@bareinboim2016causal 通过**选择图（selection diagrams）**对此进行了形式化：增加了特殊“选择”节点$S$的有向无环图（DAGs），这些节点指示源与目标之间哪些机制存在差异。
+
+关键结果（非正式表述）：如果环境之间的差异（由$S$编码）可以利用因果结构“调整消除”，那么因果效应就可以从源移植到目标。具体而言，目标域的因果效应可以从源数据加上哪些机制存在差异的知识中识别出来。
+
+对于AI评测而言，这意味着：如果我们能够识别基准测试设置与部署之间*发生了什么变化*，并且评测DAG提供了一条调整这些变化的路径，那么基准测试结果就可移植到新的部署情境。如果唯一的改变是题目分布（协变量偏移），重要性加权就足够了。如果模型的行为发生变化（概念漂移），我们就需要额外的假设或来自目标域的新数据。
+
+{{< include _plt_setup.qmd >}}
+
+```{pyodide-python}
+#| label: shift-taxonomy
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.special import expit
+
+np.random.seed(42)
+
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+theta_range = np.linspace(-3, 3, 200)
+
+# --- Panel 1: Covariate Shift ---
+# Source: easy items (beta ~ N(-1, 0.5))
+# Target: broad items (beta ~ N(0, 1.5))
+beta_source = np.random.normal(-1, 0.5, 500)
+beta_target = np.random.normal(0, 1.5, 500)
+
+axes[0].hist(beta_source, bins=30, alpha=0.6, color='#5B8DEE', density=True, label='Source (benchmark)')
+axes[0].hist(beta_target, bins=30, alpha=0.6, color='#E8637A', density=True, label='Target (deployment)')
+axes[0].set_xlabel(r'Item difficulty ($\beta$)')
+axes[0].set_ylabel('Density')
+axes[0].set_title('Covariate Shift')
+axes[0].legend()
+axes[0].set_xlim(-4, 4)
+
+# Inset: same ICC in both
+ax_inset1 = axes[0].inset_axes([0.55, 0.55, 0.4, 0.35])
+theta_ex = 0.5
+p_source = expit(theta_ex - theta_range)
+ax_inset1.plot(theta_range, p_source, '#5B8DEE', linewidth=1.5, label='Source')
+ax_inset1.plot(theta_range, p_source, '#E8637A', linewidth=1.5, linestyle='--', label='Target')
+ax_inset1.set_title('Same P(Y|X)')
+ax_inset1.set_xticks([])
+ax_inset1.set_yticks([])
+
+# --- Panel 2: Label Shift ---
+# Source: 50% correct base rate
+# Target: 10% correct base rate
+n_items = 1000
+y_source = np.random.binomial(1, 0.5, n_items)
+y_target = np.random.binomial(1, 0.1, n_items)
+
+categories = ['Correct', 'Incorrect']
+source_rates = [y_source.mean(), 1 - y_source.mean()]
+target_rates = [y_target.mean(), 1 - y_target.mean()]
+
+x_pos = np.arange(len(categories))
+width = 0.35
+axes[1].bar(x_pos - width/2, source_rates, width, color='#5B8DEE', alpha=0.7, label='Source')
+axes[1].bar(x_pos + width/2, target_rates, width, color='#E8637A', alpha=0.7, label='Target')
+axes[1].set_xticks(x_pos)
+axes[1].set_xticklabels(categories)
+axes[1].set_ylabel('Proportion')
+axes[1].set_title('Label Shift')
+axes[1].legend()
+axes[1].set_ylim(0, 1.1)
+
+# --- Panel 3: Concept Drift ---
+# Source: Rasch with beta=0
+# Target: Rasch with beta shifted AND discrimination changed
+beta_fixed = 0.0
+p_source_icc = expit(theta_range - beta_fixed)
+p_target_icc = expit(1.5 * (theta_range - 0.5))  # Different discrimination and difficulty
+
+axes[2].plot(theta_range, p_source_icc, '#5B8DEE', linewidth=2.5, label='Source: P(Y|X)')
+axes[2].plot(theta_range, p_target_icc, '#E8637A', linewidth=2.5, linestyle='--', label='Target: P(Y|X)')
+axes[2].fill_between(theta_range, p_source_icc, p_target_icc, alpha=0.15, color='#F0A35C')
+axes[2].set_xlabel(r'Ability ($\theta$)')
+axes[2].set_ylabel('P(Correct)')
+axes[2].set_title('Concept Drift')
+axes[2].legend()
+axes[2].set_ylim(-0.05, 1.05)
+
+plt.tight_layout()
+plt.show()
+
+print("Distribution Shift Summary:")
+print(f"  Covariate shift: source mean difficulty = {beta_source.mean():.2f}, "
+      f"target mean difficulty = {beta_target.mean():.2f}")
+print(f"  Label shift: source base rate = {y_source.mean():.2f}, "
+      f"target base rate = {y_target.mean():.2f}")
+print(f"  Concept drift: P(Y|X) changes between source and target")
+```
+
+三个面板说明了分布偏移的分类。**协变量偏移**（左）：基准题库集中在简单难度（蓝色），而部署题目覆盖了更广的范围（红色），但题目特征曲线在两种情形下是相同的。**标签偏移**（中）：正确答案的基础比率在基准（50%）和部署（10%）之间不同。**概念漂移**（右）：能力与作答概率之间的关系本身发生了变化——目标 ICC（红色虚线）具有与源（蓝色）不同的区分度和难度，因此对题目进行重新加权无法修正估计。
+
+
+## 离线策略评估与双重稳健估计 {#sec-off-policy}
+
+分布偏移框架告诉我们基准结果*何时*存在偏差。本节将开发*修正*该偏差的工具，借鉴上下文赌博机的离线策略评估文献。
+
+### 将评估建模为赌博机框架 {#sec-bandit-framing}
+
+我们将 AI 评估重新表述为一个离线策略估计问题。关键的对应关系如下：
+
+| 赌博机概念 | AI 评估转换 |
+|---|---|
+| 上下文 $x$ | 评估项（内容、格式、难度） |
+| 动作 $a$ | 模型的响应 |
+| 奖励 $r$ | 正确性分数（$0$ 或 $1$，或连续质量评分） |
+| 记录策略 $\pi_0(a \mid x)$ | 基准设计过程——题目是如何选择和实施的 |
+| 目标策略 $\pi(a \mid x)$ | 模型在部署条件下的行为 |
+
+::: {.callout-note title="定义：离线策略评估"}
+给定在记录策略 $\pi_0$ 下收集的日志数据 $\{(x_t, a_t, r_t)\}_{t=1}^n$，离线策略评估问题是估计目标策略 $\pi$ 的**价值**：
+
+$$
+V(\pi) = \mathbb{E}_{x \sim P, a \sim \pi(\cdot \mid x)}[r(x, a)]
+$$
+
+而不通过部署 $\pi$ 来收集新数据。
+:::
+
+为什么这个框架很重要？只要题目不是均匀选择的——通过自适应测试（@sec-cat）、便利抽样，或者任何使某些题目更可能出现的题目设计过程——我们就是在 $\pi_0$ 下观察奖励，却想估计 $\pi$ 下的性能。朴素准确率（奖励的简单平均）是有偏的，因为 $\pi_0 \neq \pi$。
+
+### 三种估计器 {#sec-three-estimators}
+
+三种经典估计器解决此问题，它们各自有不同的偏差-方差权衡。
+
+**直接方法（DM）。** 构建一个奖励模型 $\hat{r}(x, a)$，并用它预测目标策略下的奖励：
+
+$$
+\hat{V}_{\text{DM}} = \frac{1}{n} \sum_{t=1}^{n} \hat{r}(x_t, \pi)
+$$ {#eq-dm}
+
+其中 $\hat{r}(x_t, \pi) = \sum_a \pi(a \mid x_t) \hat{r}(x_t, a)$ 将奖励模型对目标策略的动作分布求积分。在 AIMS 语境中，$\hat{r}$ 正是 @sec-foundations 中的 IRT 模型：$\hat{r}(x, a) = P(Y = 1 \mid \theta, \beta_x)$。直接方法正是我们在第 1 到第 3 章一直在做的：使用拟合的 IRT 模型来预测性能。
+
+当奖励模型设定错误时，直接方法是有偏的。如果IRT模型是错误的——可能真实的数据生成过程存在模型无法捕捉的交互作用——预测结果就会系统性地偏离。
+
+**逆倾向加权（IPW）。** 不建模奖励，而是建模选择过程并对观测进行重新加权：
+
+$$
+\hat{V}_{\text{IPW}} = \frac{1}{n} \sum_{t=1}^{n} \frac{\pi(a_t \mid x_t)}{\pi_0(a_t \mid x_t)} r_t
+$$ {#eq-ipw}
+
+每个观测按目标策略采取该动作的可能性与记录策略采取该动作的可能性之比进行加权。当倾向性已知时，IPW是无偏的，但当$\pi_0$和$\pi$差异很大时（权重变得很大），方差可能非常高。
+
+::: {.callout-important title="CAT倾向性问题"}
+在计算机化自适应测验（@sec-cat）中，题目是根据当前能力估计值最大化Fisher信息量来选择的。这意味着题目选择概率 $\pi_0(x_t \mid \hat{\theta}_t)$ 是非均匀的：接近模型估计能力的题目被大量过度采样，而非常简单和非常难的题目则采样不足。
+
+在CAT选择的题目上，朴素准确率是有偏的，因为题目库是故意非代表性的。IPW通过对自适应算法不太可能选择的题目进行上加权来纠正这一点。倾向性 $\pi_0$ 可从CAT算法的选择规则中得知（在贪婪CAT中，当前估计下具有最大Fisher信息量的题目以概率1被选择；在随机变体中，以与信息量成比例的概率选择）。
+:::
+
+**双重稳健估计量（DR）。** 双重稳健估计量[@dudik2011doubly; @robins1994estimation]结合了两种方法：
+
+$$
+\hat{V}_{\text{DR}} = \frac{1}{n} \sum_{t=1}^{n} \left[ \hat{r}(x_t, \pi) + \frac{\pi(a_t \mid x_t)}{\pi_0(a_t \mid x_t)} \bigl(r_t - \hat{r}(x_t, a_t)\bigr) \right]
+$$ {#eq-dr}
+
+::: {.callout-note title="定义：双重稳健估计量"}
+DR估计量通过一个倾向加权校正项 $\frac{\pi}{\pi_0}(r_t - \hat{r})$ 增强直接方法的预测 $\hat{r}(x_t, \pi)$。它是**双重稳健**的：只要*奖励模型 $\hat{r}$ 或倾向模型 $\pi_0$ 中有一个被正确设定*（但不一定两者都正确），它就是一致估计量。
+
+- 当 $\hat{r}$ 正确时：残差 $r_t - \hat{r}(x_t, a_t)$ 的期望为零，因此校正项消失，$\hat{V}_{\text{DR}} \approx \hat{V}_{\text{DM}}$。
+- 当 $\hat{r}$ 错误但 $\pi_0$ 正确时：IPW项纠正了模型的偏差，从而得到无偏估计。
+:::
+
+**双重稳健性的证明。** 我们验证当任一模型正确时，$\mathbb{E}[\hat{V}_{\text{DR}}] = V(\pi)$。取期望：
+
+$$
+\mathbb{E}[\hat{V}_{\text{DR}}] = \mathbb{E}\!\left[\hat{r}(x, \pi)\right] + \mathbb{E}\!\left[\frac{\pi(a \mid x)}{\pi_0(a \mid x)}(r - \hat{r}(x, a))\right]
+$$
+
+对于第二项，条件于 $x$：
+
+$$
+\mathbb{E}\!\left[\frac{\pi(a \mid x)}{\pi_0(a \mid x)}(r - \hat{r}(x, a)) \;\middle|\; x\right] = \sum_a \pi_0(a \mid x) \frac{\pi(a \mid x)}{\pi_0(a \mid x)} \bigl(\mathbb{E}[r \mid x, a] - \hat{r}(x, a)\bigr)
+$$
+
+$$
+= \sum_a \pi(a \mid x) \bigl(r^*(x, a) - \hat{r}(x, a)\bigr)
+$$
+
+其中 $r^*(x, a) = \mathbb{E}[r \mid x, a]$ 为真实奖励函数。若 $\hat{r} = r^*$，此项为零。若 $\pi_0$ 正确（在重要性加权中，根据构造它是正确的），则完整的期望变为：
+
+$$
+\mathbb{E}[\hat{V}_{\text{DR}}] = \mathbb{E}\!\left[\hat{r}(x, \pi)\right] + \mathbb{E}_x\!\left[\sum_a \pi(a \mid x)(r^*(x,a) - \hat{r}(x,a))\right] = \mathbb{E}_x\!\left[\sum_a \pi(a \mid x) r^*(x, a)\right] = V(\pi)
+$$
+
+### 与预测增强推断的联系 {#sec-ppi-connection}
+
+预测增强推断（Prediction-Powered Inference, PPI）[@angelopoulos2023prediction] 是近期提出的一个框架，其结构与双重稳健估计等价。PPI 利用一个小型有标签数据集 $\mathcal{D}_n = \{(X_i, Y_i)\}_{i=1}^n$（成本高昂：实际模型评估）和一个大型无标签数据集 $\mathcal{D}_N = \{(X_i, \hat{Y}_i)\}_{i=1}^N$（成本低廉：模型预测或自动评分）来估计总体量 $\mu = \mathbb{E}[Y]$：
+
+$$
+\hat{\mu}_{\text{PPI}} = \frac{1}{N} \sum_{i \in \mathcal{D}_N} \hat{Y}_i + \frac{1}{n} \sum_{i \in \mathcal{D}_n} (Y_i - \hat{Y}_i)
+$$ {#eq-ppi}
+
+第一项是使用廉价预测的直接方法估计。第二项是偏差校正：它利用有标签子样本来估计 $\hat{Y}$ 中的系统误差。这正符合 DR 结构：填补 + 校正。
+
+与 @sec-cold-start 中的冷启动流程的联系是直接的。第 2 章中的预测增强评估（Prediction-Powered Evaluation, PPE）方法学习从模型嵌入和元数据到 IRT 参数的映射，为未见过的模型–题目对生成预测 $\hat{Y}_{ij}$。PPI 提供了去偏步骤：使用少量实际评估来校正 PPE 预测，从而得到模型性能的有效置信区间。PPE 预测充当填补模型 $\hat{r}$；实际评估提供有标签校正 $Y - \hat{Y}$。
+
+### 针对协变量偏移的重要性加权 {#sec-importance-weighting}
+
+当基准与部署之间的偏移纯粹是协变量偏移（$P^{(s)}(Y \mid X) = P^{(t)}(Y \mid X)$，$P^{(s)}(X) \neq P^{(t)}(X)$）时，重要性加权估计量可校正偏差 [@shimodaira2000improving]：
+
+$$
+\hat{\mu}_{\text{IW}} = \frac{\sum_{i=1}^n w(x_i) Y_i}{\sum_{i=1}^n w(x_i)}, \quad w(x_i) = \frac{P^{(t)}(x_i)}{P^{(s)}(x_i)}
+$$ {#eq-iw}
+
+这是自归一化变体，比未归一化版本更稳定。权重 $w(x_i)$ 增大了在基准中相对于部署代表性不足的条目的权重，并降低代表性过高的条目的权重。
+
+**实际挑战：**
+
+- **密度比估计**：权重需要知道或估计密度比 $P^{(t)}/P^{(s)}$。方法包括在领域分类器上的逻辑回归、核均值匹配和矩匹配 [@sugiyama2012density]。
+- **权重裁剪**：极端权重会放大方差。将权重裁剪到最大值 $M$（例如 $w_i \leftarrow \min(w_i, M)$）以偏差换取方差缩减。
+- **有效样本量**：有效样本量 $n_{\text{eff}} = (\sum w_i)^2 / \sum w_i^2$ 衡量重加权样本中包含的信息量。当 $n_{\text{eff}} \ll n$ 时，重要性加权估计不可靠。
+
+**人工智能示例。** 一个推理基准对代数题目进行了过采样（60% 代数，20% 几何，20% 组合数学）。部署分布在各主题上均匀。重要性加权重新分配权重：代数题目获得权重 $w = 1/3 \div 3/5 = 5/9$，而几何和组合数学题目获得权重 $w = 1/3 \div 1/5 = 5/3$。校正后的准确率更能反映部署表现。
+
+```{pyodide-python}
+#| label: dr-estimation
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.special import expit
+
+np.random.seed(123)
+
+# --- Simulate CAT-like adaptive item selection ---
+n_models = 50
+n_items_pool = 200
+n_selected = 30  # Items selected per model by CAT
+n_reps = 500
+
+# True model abilities
+theta_true = np.random.normal(0, 1, n_models)
+# Item difficulties spanning the range
+beta_pool = np.linspace(-3, 3, n_items_pool)
+
+# True value: average accuracy under uniform item selection
+true_values = np.zeros(n_models)
+for j in range(n_models):
+    true_values[j] = expit(theta_true[j] - beta_pool).mean()
+
+# Run repeated experiments
+dm_estimates = np.zeros((n_reps, n_models))
+ipw_estimates = np.zeros((n_reps, n_models))
+dr_estimates = np.zeros((n_reps, n_models))
+naive_estimates = np.zeros((n_reps, n_models))
+
+for rep in range(n_reps):
+    for j in range(n_models):
+        # CAT item selection: select items near theta (high Fisher info)
+        # Propensity: proportional to Fisher information
+        p_items = expit(theta_true[j] - beta_pool)
+        fisher_info = p_items * (1 - p_items)  # Rasch Fisher info
+        propensity = fisher_info / fisher_info.sum()  # Normalized propensity
+
+        # Select items (with replacement for simplicity)
+        selected = np.random.choice(n_items_pool, n_selected, p=propensity, replace=False)
+        beta_selected = beta_pool[selected]
+        prop_selected = propensity[selected]
+
+        # Generate responses
+        p_correct = expit(theta_true[j] - beta_selected)
+        responses = np.random.binomial(1, p_correct)
+
+        # Uniform target propensity
+        target_prop = 1.0 / n_items_pool
+
+        # --- Naive estimate (simple average) ---
+        naive_estimates[rep, j] = responses.mean()
+
+        # --- Direct Method: use true IRT model ---
+        # Slight misspecification: use noisy theta estimate
+        theta_hat = theta_true[j] + np.random.normal(0, 0.3)
+        dm_pred = expit(theta_hat - beta_pool).mean()
+        dm_estimates[rep, j] = dm_pred
+
+        # --- IPW ---
+        weights = target_prop / prop_selected
+        weights = weights / weights.sum()  # Self-normalize
+        ipw_estimates[rep, j] = (weights * responses).sum()
+
+        # --- Doubly Robust ---
+        r_hat = expit(theta_hat - beta_selected)  # IRT prediction for selected items
+        r_hat_full = expit(theta_hat - beta_pool).mean()  # DM estimate
+        correction = (weights * (responses - r_hat)).sum()
+        dr_estimates[rep, j] = r_hat_full + correction
+
+# --- Compute bias and RMSE ---
+def compute_stats(estimates, true_vals):
+    bias = (estimates.mean(axis=0) - true_vals).mean()
+    rmse = np.sqrt(((estimates.mean(axis=0) - true_vals)**2).mean())
+    return bias, rmse
+
+stats = {
+    'Naive': compute_stats(naive_estimates, true_values),
+    'DM (IRT)': compute_stats(dm_estimates, true_values),
+    'IPW': compute_stats(ipw_estimates, true_values),
+    'DR': compute_stats(dr_estimates, true_values)
+}
+
+# --- Visualization ---
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+methods = list(stats.keys())
+biases = [stats[m][0] for m in methods]
+rmses = [stats[m][1] for m in methods]
+colors = ['#B07CD8', '#5B8DEE', '#F0A35C', '#45BF7C']
+
+# Panel 1: Bias
+bars1 = axes[0].bar(methods, biases, color=colors, alpha=0.8, edgecolor='white')
+axes[0].axhline(y=0, color='black', linewidth=0.8)
+axes[0].set_ylabel('Bias')
+axes[0].set_title('Estimation Bias (500 replications)')
+for bar, val in zip(bars1, biases):
+    axes[0].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001,
+                 f'{val:.4f}', ha='center', fontweight='bold')
+
+# Panel 2: RMSE
+bars2 = axes[1].bar(methods, rmses, color=colors, alpha=0.8, edgecolor='white')
+axes[1].set_ylabel('RMSE')
+axes[1].set_title('Root Mean Squared Error (500 replications)')
+for bar, val in zip(bars2, rmses):
+    axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.001,
+                 f'{val:.4f}', ha='center', fontweight='bold')
+
+plt.tight_layout()
+plt.show()
+
+print(f"\nOff-Policy Estimation Results ({n_reps} replications, {n_models} models):")
+print(f"  {'Method':<12} {'Bias':>8} {'RMSE':>8}")
+print(f"  {'-'*28}")
+for m in methods:
+    print(f"  {m:<12} {stats[m][0]:>8.4f} {stats[m][1]:>8.4f}")
+```
+
+该模拟演示了在类似CAT的自适应选题下的离策略估计问题。**朴素**估计量（对自适应选题的回答简单平均）是有偏的，因为CAT算法会过度采样接近模型能力水平的题目。**直接方法**（使用含噪能力估计的IRT预测）在模型近似正确时偏差较低，但对模型设定错误很敏感。**IPW**可纠正选择偏差，但由于极端权重导致方差较大。**双重稳健**估计量结合了两者的优势，通过使用IRT模型进行插补和IPW进行偏差校正，实现了最低的RMSE。
+
+```{pyodide-python}
+#| label: importance-weighting
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.special import expit
+from scipy.stats import norm
+
+np.random.seed(456)
+
+# --- Simulate covariate shift: benchmark oversamples easy items ---
+n_models = 100
+n_source_items = 200
+n_target_items = 200
+
+theta = np.random.normal(0.5, 1, n_models)
+
+# Source: easy-biased item pool (mean difficulty = -1)
+beta_source = np.random.normal(-1, 0.7, n_source_items)
+# Target: broad item pool (mean difficulty = 0)
+beta_target = np.random.normal(0, 1.5, n_target_items)
+
+# Compute true accuracy under each distribution
+acc_source = np.array([expit(th - beta_source).mean() for th in theta])
+acc_target = np.array([expit(th - beta_target).mean() for th in theta])
+
+# Importance-weighted estimate using source data
+# Weight each source item by p_target(beta) / p_source(beta)
+weights = norm.pdf(beta_source, 0, 1.5) / norm.pdf(beta_source, -1, 0.7)
+weights = weights / weights.sum() * len(weights)  # Normalize to sum to n
+
+# Compute IW-corrected accuracy for each model
+acc_iw = np.zeros(n_models)
+for j in range(n_models):
+    p_correct = expit(theta[j] - beta_source)
+    acc_iw[j] = (weights * p_correct).mean()
+
+# --- Visualization ---
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+# Panel 1: Item distributions
+beta_range = np.linspace(-4, 4, 200)
+axes[0].plot(beta_range, norm.pdf(beta_range, -1, 0.7), '#5B8DEE', linewidth=2.5,
+             label='Source (benchmark)')
+axes[0].plot(beta_range, norm.pdf(beta_range, 0, 1.5), '#E8637A', linewidth=2.5,
+             label='Target (deployment)')
+axes[0].fill_between(beta_range, norm.pdf(beta_range, -1, 0.7), alpha=0.15, color='#5B8DEE')
+axes[0].fill_between(beta_range, norm.pdf(beta_range, 0, 1.5), alpha=0.15, color='#E8637A')
+axes[0].set_xlabel(r'Item difficulty ($\beta$)')
+axes[0].set_ylabel('Density')
+axes[0].set_title('Item Distributions: Source vs Target')
+axes[0].legend()
+
+# Panel 2: Accuracy estimates
+# Sort by target accuracy for clearer visualization
+sort_idx = np.argsort(acc_target)
+model_rank = np.arange(n_models)
+
+axes[1].scatter(model_rank, acc_source[sort_idx], color='#5B8DEE', s=20, alpha=0.6,
+                label=f'Naive (source): mean={acc_source.mean():.3f}')
+axes[1].scatter(model_rank, acc_iw[sort_idx], color='#45BF7C', s=20, alpha=0.6,
+                label=f'IW-corrected: mean={acc_iw.mean():.3f}')
+axes[1].scatter(model_rank, acc_target[sort_idx], color='#E8637A', s=20, alpha=0.6,
+                label=f'True target: mean={acc_target.mean():.3f}')
+axes[1].set_xlabel('Model rank (by true target accuracy)')
+axes[1].set_ylabel('Estimated accuracy')
+axes[1].set_title('Covariate Shift Correction')
+axes[1].legend(loc='lower right')
+
+plt.tight_layout()
+plt.show()
+
+print(f"\nCovariate Shift Correction:")
+print(f"  Naive (source) mean accuracy: {acc_source.mean():.3f}")
+print(f"  IW-corrected mean accuracy:   {acc_iw.mean():.3f}")
+print(f"  True target mean accuracy:    {acc_target.mean():.3f}")
+print(f"  Naive overestimation:         {acc_source.mean() - acc_target.mean():.3f}")
+print(f"  IW residual bias:             {acc_iw.mean() - acc_target.mean():.3f}")
+```
+
+左图显示了源（基准）和目标（部署）项目难度分布。基准过度采样了简单项目（蓝色，中心在 $\beta = -1$），而部署项目跨越了更广的范围（红色，中心在 $\beta = 0$）。右图显示了后果：基于基准项目计算的朴素准确率（蓝色）系统性地高估了部署准确率（红色）。重要性加权（绿色）通过对基准中代表性不足的困难项目进行上加权来纠正偏差，使估计值接近真实的部署准确率。
+
+## 分布偏移下的共形预测 {#sec-conformal}
+
+@sec-off-policy 中的离策略估计量修正了模型性能的*点估计*。但实践者也需要*不确定性量化*：不仅仅是“模型部署准确率为 0.78”，而是“模型部署准确率在区间 $[0.72, 0.84]$ 内，置信度为 90%”。共形预测在极少的分布假设下提供了这种保证。
+
+::: {.callout-note title="定义：共形预测"}
+给定一个校准集 $\{(X_i, Y_i)\}_{i=1}^n$ 和一个新的输入 $X_{n+1}$，一个共形预测集 $C_\alpha(X_{n+1})$ 满足：
+
+$$
+P(Y_{n+1} \in C_\alpha(X_{n+1})) \geq 1 - \alpha
+$$
+
+在校准数据和测试数据是**可交换的**这一假设下（非正式地：从同一分布中无特定顺序地抽取）。无需对数据分布做参数假设。
+:::
+
+### 分割共形预测 {#sec-split-conformal}
+
+分割共形算法 [@vovk2005algorithmic] 是最简单的共形方法：
+
+1. 在训练集上拟合一个模型 $\hat{f}$。
+2. 在留出的校准集 $\{(X_i, Y_i)\}_{i=1}^n$ 上，计算非一致性得分 $s_i = |Y_i - \hat{f}(X_i)|$。
+3. 令 $\hat{q}$ 为 $\{s_1, \ldots, s_n\}$ 的 $\lceil (1-\alpha)(1 + 1/n) \rceil / n$ 分位数。
+4. 对于新的输入 $X_{n+1}$，预测 $C_\alpha(X_{n+1}) = [\hat{f}(X_{n+1}) - \hat{q}, \hat{f}(X_{n+1}) + \hat{q}]$。
+
+覆盖保证 $P(Y_{n+1} \in C_\alpha) \geq 1 - \alpha$ 对于*任何*模型 $\hat{f}$、*任何*数据分布和*任何*样本量都成立——只要校准数据和测试数据是可交换的。
+
+### 当可交换性失败时 {#sec-exchangeability-failure}
+
+在分布偏移下，可交换性失效：校准数据来自 $P^{(s)}$，而测试数据来自 $P^{(t)}$。这导致共形预测集失去其覆盖保证。具体来说，如果目标分布集中在模型准确性较低的区域（更困难的项目），基于校准的分位数 $\hat{q}$ 会低估测试时的非一致性得分，从而导致**覆盖不足**。
+
+### 加权共形预测 {#sec-weighted-conformal}
+
+@tibshirani2019conformal 表明，在协变量偏移下，通过用**重要性加权分位数**替换均匀分位数，可以恢复覆盖性。关键见解与 @sec-importance-weighting 中的重要性加权相同：对校准分数进行重新加权以匹配目标分布。
+
+该算法修改了步骤3：不再是均匀分位数，而是计算 $\{s_1, \ldots, s_n, +\infty\}$ 的加权分位数，权重为 $\{w_1, \ldots, w_n, w_{n+1}\}$，其中 $w_i = P^{(t)}(X_i) / P^{(s)}(X_i)$，$w_{n+1} = P^{(t)}(X_{n+1}) / P^{(s)}(X_{n+1})$。由此可得：
+
+$$
+P^{(t)}(Y_{n+1} \in C_\alpha(X_{n+1})) \geq 1 - \alpha
+$$
+
+在*目标*分布下，只要重要性权重正确，覆盖率保证现在也成立。@barber2023conformal 将这一点从协变量偏移扩展到更一般的分布偏移形式。
+
+```{pyodide-python}
+#| label: conformal-prediction
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.special import expit
+from scipy.stats import norm
+
+np.random.seed(789)
+
+# --- Simulate: calibrate on easy items, test on harder items ---
+n_cal = 200   # Calibration items (source)
+n_test = 200  # Test items (target)
+n_models = 50
+
+# Source: easy items; Target: harder items
+beta_cal = np.random.normal(-0.5, 0.8, n_cal)
+beta_test = np.random.normal(1.0, 1.0, n_test)
+
+# Test at multiple nominal coverage levels
+alphas = np.arange(0.05, 0.55, 0.05)
+coverage_naive = np.zeros(len(alphas))
+coverage_weighted = np.zeros(len(alphas))
+
+for a_idx, alpha in enumerate(alphas):
+    covers_naive = 0
+    covers_weighted = 0
+    n_total = 0
+
+    for j in range(n_models):
+        theta_j = np.random.normal(0, 1)
+
+        # True accuracy on calibration and test items
+        p_cal = expit(theta_j - beta_cal)
+        p_test = expit(theta_j - beta_test)
+
+        # Generate binary responses
+        y_cal = np.random.binomial(1, p_cal)
+        y_test = np.random.binomial(1, p_test)
+
+        # Model prediction: IRT probability
+        r_hat_cal = p_cal
+        r_hat_test = p_test
+
+        # Nonconformity scores on calibration set
+        scores_cal = np.abs(y_cal - r_hat_cal)
+
+        # --- Naive conformal: uniform quantile ---
+        q_level = int(np.ceil((1 - alpha) * (n_cal + 1))) - 1
+        q_level = min(q_level, n_cal - 1)
+        sorted_scores = np.sort(scores_cal)
+        q_naive = sorted_scores[q_level]
+
+        # --- Weighted conformal: importance-weighted quantile ---
+        weights = norm.pdf(beta_cal, 1.0, 1.0) / norm.pdf(beta_cal, -0.5, 0.8)
+        weights = weights / weights.sum()
+
+        # Weighted quantile
+        sorted_idx = np.argsort(scores_cal)
+        cum_weights = np.cumsum(weights[sorted_idx])
+        q_idx = np.searchsorted(cum_weights, 1 - alpha)
+        q_idx = min(q_idx, n_cal - 1)
+        q_weighted = scores_cal[sorted_idx[q_idx]]
+
+        # Check coverage on test items
+        for i in range(n_test):
+            score_test = np.abs(y_test[i] - r_hat_test[i])
+            covers_naive += (score_test <= q_naive)
+            covers_weighted += (score_test <= q_weighted)
+            n_total += 1
+
+    coverage_naive[a_idx] = covers_naive / n_total
+    coverage_weighted[a_idx] = covers_weighted / n_total
+
+# --- Visualization ---
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+# Panel 1: Coverage vs nominal level
+nominal = 1 - alphas
+axes[0].plot(nominal, nominal, 'k--', linewidth=1, label='Ideal (y = x)')
+axes[0].plot(nominal, coverage_naive, 'o-', color='#E8637A', linewidth=2, markersize=6,
+             label='Naive conformal')
+axes[0].plot(nominal, coverage_weighted, 's-', color='#45BF7C', linewidth=2, markersize=6,
+             label='Weighted conformal')
+axes[0].fill_between(nominal, nominal - 0.03, nominal + 0.03, alpha=0.1, color='gray',
+                     label='±3% tolerance')
+axes[0].set_xlabel('Nominal coverage (1 - α)')
+axes[0].set_ylabel('Empirical coverage')
+axes[0].set_title('Coverage Calibration Under Shift')
+axes[0].legend()
+axes[0].set_xlim(0.45, 1.0)
+axes[0].set_ylim(0.45, 1.05)
+
+# Panel 2: Distribution comparison
+beta_range = np.linspace(-3, 4, 200)
+axes[1].plot(beta_range, norm.pdf(beta_range, -0.5, 0.8), '#5B8DEE', linewidth=2.5,
+             label='Calibration (easy)')
+axes[1].plot(beta_range, norm.pdf(beta_range, 1.0, 1.0), '#E8637A', linewidth=2.5,
+             label='Test (hard)')
+axes[1].fill_between(beta_range, norm.pdf(beta_range, -0.5, 0.8), alpha=0.15, color='#5B8DEE')
+axes[1].fill_between(beta_range, norm.pdf(beta_range, 1.0, 1.0), alpha=0.15, color='#E8637A')
+axes[1].set_xlabel(r'Item difficulty ($\beta$)')
+axes[1].set_ylabel('Density')
+axes[1].set_title('Calibration vs Test Item Distributions')
+axes[1].legend()
+
+plt.tight_layout()
+plt.show()
+
+print(f"\nConformal Prediction Under Covariate Shift:")
+print(f"  {'Nominal':>8} {'Naive':>8} {'Weighted':>8} {'Gap (naive)':>12}")
+for i in range(len(alphas)):
+    nom = 1 - alphas[i]
+    print(f"  {nom:>8.2f} {coverage_naive[i]:>8.3f} {coverage_weighted[i]:>8.3f} "
+          f"{coverage_naive[i] - nom:>+12.3f}")
+```
+
+左图显示了覆盖率校准：对角线代表完美校准（经验覆盖率 = 名义覆盖率）。朴素共形预测（红色）位于对角线下方——它承诺 90% 的覆盖率，但实际提供的却更少，因为校准项目（简单）并不能代表测试项目（困难）。加权共形预测（绿色）通过重新加权校准分数以匹配测试分布，从而恢复了覆盖率。右图显示了问题的根源：校准分布（蓝色）相对于测试分布（红色）向左偏移（项目更容易）。
+
+
+## 融会贯通：一个因果审计 {#sec-causal-audit}
+
+我们以一个综合运用本章所有工具的完整示例来结束本章。考虑“CodeReason”，这是一个假设的基准，声称用于测量语言模型的编码推理能力。
+
+**步骤 1：绘制评估有向无环图（DAG）**（@sec-evaluation-dag）。我们确定了以下变量：训练数据 $D$（代码仓库、文档）、架构 $A$（Transformer 变体）、潜在编码能力 $\theta$、基准项目 $\beta$（编码问题）、提示模板 $F$（指令格式）以及观测得分 $Y$。我们怀疑有两条威胁有效性的路径：(i) 绕过了 $\theta$ 的 $D \to Y$（部分模型在 CodeReason 的源仓库上进行了训练）；(ii) $F \to Y$（该基准使用了特定的指令格式，使得某些模型更占优势）。
+
+**步骤 2：检查分布偏移**（@sec-shift-taxonomy）。基准项目主要是中等难度的 Python 函数补全任务。而部署环境则要求跨 Python、JavaScript 和 Rust 进行调试、多文件推理和代码审查。这是一种协变量偏移：项目分布 $P^{(s)}(\beta)$ 比 $P^{(t)}(\beta)$ 更狭窄。我们使用一个经过训练的域分类器来区分基准项目和部署项目，以此来估计密度比。
+
+**步骤 3：应用双重稳健估计**（@sec-three-estimators）。我们结合了两个部分：(a) 基于基准数据拟合的项目反应理论（IRT）模型，提供了 $\hat{r}(x, a)$——直接法对每个模型在任何项目上准确率的估计值；(b) 来自步骤 2 的密度比权重，提供了重要性权重。双重稳健（DR）估计量使用重要性加权残差来校正 IRT 预测。最终结果是一个既考虑了项目选择偏差，又考虑了 IRT 设定错误的准确率估计值。
+
+**步骤 4：构建预测区间**（@sec-weighted-conformal）。利用步骤 2 中的重要性权重，我们将加权共形预测应用于 DR 校正后的估计值。结果是：“模型 X 的部署准确率在 [0.62, 0.71] 之间，覆盖率为 90%。” 该区间比无偏移情况下的区间更宽，反映了外推到不同项目分布所带来的额外不确定性。
+
+**步骤 5：诊断污染** (@sec-causal-contamination). 我们比较模型在训练数据截止日期前后创建的题目上的表现（按时间划分）。疑似污染的模型在截止日期前后的题目之间表现出 15 个百分点的准确率差距。我们进行了题目拟合分析（@sec-item-fit），发现对于这些模型，截止日期前题目的离群统计量出现了膨胀。结论：$D \to Y$ 路径对于这些模型是活跃的。我们标记这些模型，并报告经污染调整和未经调整的排名。
+
+这五步因果审计将本章的工具与 @sec-validity-diagnostics 中的诊断方法相结合，提供了一种系统性的方法，用于评估基准结果是否足够可信以指导部署决策。
+
+
+## 讨论题 {#sec-causality-discussion}
+
+1. 一个基准使用计算机自适应测试（@sec-cat）来选择题目。一位批评者认为由此产生的准确率“存在偏差，因为模型只回答了与其能力水平匹配的题目”。使用离线策略评估框架，解释这种批评是否成立，以及如果需要，你将如何校正估计值。
+
+2. 两个基准都声称是测量“推理”能力。在基准 A 上，模型 X 优于模型 Y。在基准 B 上，排名反转。绘制一个有向无环图（DAG）来解释这种反转（提示：考虑辛普森悖论）。什么因果假设会让基准 A 的排名成为正确的排名？
+
+3. 预测驱动的推断假设模型预测 $\hat{Y}$ 包含了关于真实标签 $Y$ 的信息。在 AI 评估中，这一假设何时可能失效？这对 DR 估计量的一致性有何后果，以及你将如何检测这种失效？
+
+4. 一家公司在一个内部基准（源）上评估其模型，并希望预测在面向客户的部署（目标）上的性能。需要哪些信息来确定基准结果是否可迁移？哪些假设仅凭源数据是无法检验的？
+
+5. 共形预测保证的是*边际*覆盖率：在测试分布上平均有 $P(Y \in C_\alpha) \geq 1 - \alpha$。为什么这比*条件*覆盖率（对每个 $x$ 有 $P(Y \in C_\alpha \mid X = x) \geq 1 - \alpha$）更弱？这种区别何时对 AI 评估很重要？
+
+
+## 文献注释 {#sec-causality-biblio}
+
+本章所使用的因果推理数学框架归功于 @pearl2009causality，他提出了结构因果模型、do-演算以及可识别性的图形化准则。@peters2017elements 提供了一个易于理解的导论。可迁移性理论——即因果结论何时可以跨情境进行迁移——由 @bareinboim2016causal 提出。
+
+分布偏移的分类学借鉴了大量文献。协变量偏移和重要性加权由 @shimodaira2000improving 正式提出。@sugiyama2012density 对密度比估计方法进行了全面论述。@quinonero2009dataset 综述了机器学习中数据集偏移的更广泛图景。
+
+双重稳健估计起源于生物统计学文献，由 @robins1994estimation 提出了增广逆概率加权估计量。@dudik2011doubly 将双重稳健框架应用于情境赌博机和离线策略评估，这正是我们在此使用的形式。双重稳健估计与半参数效率理论之间的联系在生物统计学文献中有所发展；机器学习应用方面，可参阅 Dudík、Erber、Langford 和 Li（2014）的综述。
+
+预测驱动的推断由 @angelopoulos2023prediction 提出，他们展示了如何结合少量有标签数据集与大量模型预测，构建有效的置信区间。他们的论文指出了 PPI 与双重稳健估计之间的结构联系，并在后续的 PPI++ 工作中进一步发展。
+
+保形预测由 @vovk2005algorithmic 提出。@tibshirani2019conformal 通过重要性加权扩展了保形方法以处理协变量偏移，@barber2023conformal 进一步将该框架泛化至可交换性之外的情形。
+
+Borsboom 的因果效度与结构因果模型之间的联系在 @sec-foundations 中发展。本章中的评估 DAG 明确建立了该联系，展示了 @sec-validity-threats 中的每种效度威胁如何对应于一条特定的因果路径。数据归因方法——影响函数、TracIn 和 TRAK——为追踪训练数据对模型预测的因果效应提供了互补工具，但超出了本章范围；开创性工作见 Koh 和 Liang (2017)。
+
+
+## 练习 {#sec-causality-exercises}
+
+**理论**
+
+1. 证明在协变量偏移下（$P^{(s)}(Y \mid X) = P^{(t)}(Y \mid X)$，$P^{(s)}(X) \neq P^{(t)}(X)$），重要性加权估计量 $\hat{\mu}_{\text{IW}} = \frac{1}{n}\sum_{i=1}^n w(x_i) Y_i$，其中 $w(x_i) = P^{(t)}(x_i)/P^{(s)}(x_i)$，是 $\mathbb{E}_{P^{(t)}}[Y]$ 的无偏估计。权重分布的何种条件下 $\hat{\mu}_{\text{IW}}$ 的方差会发散？
+
+2. 证明双重稳健性质：证明若满足 (a) 奖励模型满足对所有的 $(x, a)$ 有 $\hat{r}(x, a) = \mathbb{E}[r \mid x, a]$，或 (b) 倾向性 $\pi_0(a \mid x)$ 被正确设定，则 $\mathbb{E}[\hat{V}_{\text{DR}}] = V(\pi)$ (@eq-dr)。证明的哪一步依赖于记录数据是在 $\pi_0$ 下收集的假设？
+
+3. 在根据当前能力估计值 $\hat{\theta}$ 选择最大化 Fisher 信息量的项目的 CAT 过程中，针对 Rasch 模型推导选择倾向性 $\pi_0(x_t \mid \hat{\theta}_t)$。证明对于满足 $\beta_i \approx \hat{\theta}_t$ 的项目，该倾向性最大，并随项目远离当前估计值而衰减。作为项目池难度分布的函数，所得 IPW 估计量的有效样本量 $n_{\text{eff}}$ 是多少？
+
+4. 使用 @sec-evaluation-dag 中的评估 DAG ，证明基准污染（绕过 $\theta$ 的直接路径 $D \to Y$）在无额外假设的情况下，仅从观测数据中*不可识别*。什么样的最小干预（例如，按时间顺序划分或金丝雀测试）能够识别污染效应？精确陈述识别假设。
+
+**计算题**
+
+5. 针对存在协变量偏移的基准测试实现重要性加权。模拟一个 Rasch 模型，其中 $P^{(s)}(\beta) = \mathcal{N}(-1, 1)$（偏向简单题的来源）和 $P^{(t)}(\beta) = \mathcal{N}(0, 1.5)$（更广泛的目标）。对 200 个模型，比较朴素估计和经 IW 修正的准确度估计。通过将来源均值从 $-2$ 改变到 $0$ 来调整偏移程度，并绘制朴素偏差随偏移量级变化的图像。
+
+6. 在包含 500 题的 Rasch 题库上，为 200 个模型模拟完整的 CAT 过程。对每个模型，使用 @sec-cat 中的最大信息量选题规则运行 30 题的适应性测试。计算朴素准确度、IPW 修正准确度以及 DR 修正准确度。引入 IRT 模型误设（例如，真实模型为 2PL ，但奖励模型假设为 Rasch ），并展示 DR 保持稳健而 DM 性能下降。
+
+7. 在协变量偏移下，为 AI 评估实现加权共形预测。在从 $\mathcal{N}(-0.5, 0.8)$ 抽取的项目上校准，并在从 $\mathcal{N}(1.0, 1.0)$ 抽取的项目上测试。在 $\alpha \in [0.05, 0.50]$ 范围内，绘制标准共形和加权共形的经验覆盖率与名义水平的对比图。加权校准集的有效样本量如何影响覆盖率保证？
+
+**讨论**
+
+8. @angelopoulos2023prediction 的 PPI 使用廉价的模型预测来增强昂贵的人工标签。在 AI 评估中，“昂贵”的标签是实际的模型运行，而“廉价”的预测则是来自 @sec-cold-start 的 PPE 冷启动预测。设计一个实用的 PPI 流程，用于在只能承担 500 次实际评估的情况下，对一个新模型在 10,000 个项目上进行评估。关键设计选择有哪些（应评估哪 500 个项目？如何估计偏差修正？如何构建置信区间）？PPE 预测的准确性如何影响所得区间的宽度？

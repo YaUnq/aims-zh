@@ -1,0 +1,1266 @@
+﻿---
+format:
+  html:
+    include-after-body:
+      text: |
+        <script>
+        // Auto-execute all pyodide cells after initialization
+        document.addEventListener('DOMContentLoaded', function() {
+          // Wait for pyodide to be fully ready (mainPyodide is set after loading)
+          function waitForPyodide() {
+            if (typeof globalThis.mainPyodide !== 'undefined' && globalThis.mainPyodide) {
+              // Pyodide is ready, execute all cells with autorun=true
+              if (typeof globalThis.qpyodideCellDetails !== 'undefined') {
+                globalThis.qpyodideCellDetails.forEach((cell, index) => {
+                  if (cell.options && cell.options.autorun === 'true') {
+                    setTimeout(() => {
+                      const runButton = document.querySelector(`#qpyodide-button-run-${cell.id}`);
+                      if (runButton && !runButton.disabled) {
+                        runButton.click();
+                      }
+                    }, index * 1000); // Stagger execution by 1 second each
+                  }
+                });
+              }
+            } else {
+              setTimeout(waitForPyodide, 500);
+            }
+          }
+          setTimeout(waitForPyodide, 2000); // Start checking after 2 seconds
+        });
+        </script>
+filters:
+  - pyodide
+pyodide:
+  packages:
+    - numpy
+    - matplotlib
+---
+
+# 测量基础 {#sec-foundations}
+
+::: {.callout-note title="预期学习成果"}
+学完本章后，你将能够：
+
+1. **区分**项目反应理论、因子模型、配对比较系统（Elo、Bradley-Terry）和网络模型（GGM、Ising）。
+2. **解释**为什么Rasch模型通过总分充分性、特定客观性和测验无关测量而作为“测量模型”享有特殊地位。
+3. **推导**Rasch模型的充分性定理，并解释其对AI基准评估的意义。
+4. **比较**规定性（Rasch学派）和描述性（一般IRT）的测量方法，并阐明每种方法何时适用。
+5. **追溯**从Thurstone（1927年）到Rasch（1960年）再到现代网络心理测量学的历史发展。
+6. **联系**经典测量概念（信度、效度、维度）与当代AI基准评估。
+7. **应用**测量理论来分析AI基准是否满足科学测量的要求。
+8. **实现**基本的IRT模型，并用Python可视化项目特征曲线。
+9. **评估**AI排行榜背后的假设，并识别可能违反测量原则的情况。
+:::
+
+::: {.callout-important title="本章范围"}
+本章侧重于**模型设定**：我们介绍用于测量的概率模型，并解释每个模型的假设。我们*不*涵盖如何估计（学习）这些模型的参数——那是@sec-learning 的主题。可以将本章视为定义“什么”（模型），而下一章定义“如何”（估计）。
+:::
+
+::: {.callout-tip title="视频概述" collapse="false"}
+本章关键概念的可视化导览——从应答矩阵和项目特征曲线到因子模型和基准异质性。
+
+{{< video ../animations/ch1/chapter1_narrated.mp4 >}}
+:::
+
+::: {.callout-note title="符号"}
+本章介绍贯穿全书的核心符号：$\theta_i$（模型能力），$\beta_j$（项目难度），$a_j$（区分度），$c_j$（猜测），$Y_{ij}$（二元应答）和$\sigma(\cdot)$（logistic sigmoid）。@sec-notation 将所有符号集中一处——遇到不熟悉的符号时可查阅。来自心理学或教育领域的读者可能还会发现 @sec-transfer 中的**翻译对照表**很有用；它将经典心理测量学术语（被试、项目、信度、效度）映射到AI评估的对应概念。
+:::
+
+
+## AI中的测量问题 {#sec-measurement-problem}
+
+考虑以下场景：你已在由1000道多项选择题组成的基准上评估了100个语言模型。每个模型对每道题要么回答正确（1），要么错误（0），从而产生一个 $100 \times 1000$ 的二元响应矩阵 $Y$。你计算每个模型的准确率——即正确回答的比例——并据此对模型进行排名。
+
+你*测量*了什么吗？
+
+答案并不像看上去那么明显。你当然已经给模型*评分*了：你根据它们的表现赋予了数字。但科学意义上的测量不仅仅是赋予数字。它要求这些数字以一种有原则的方式对应某种潜在属性——一种*潜在构念*。
+
+### 评分与测量
+
+评分与测量之间的区别，对于理解为什么AI评估需要测量科学至关重要。考虑一个来自物理学的类比：如果你用水银温度计测量水的温度，水银柱的高度是一个*分数*——你可以从仪器上读出的数字。但你相信这个分数作为温度的*测量*，是因为你理解水银膨胀与热能之间的关系。
+
+在AI评估中，我们常常拥有分数却缺乏这种更深刻的理解。当GPT-4在MMLU [@hendrycks2021mmlu] 上达到86%的准确率，而Claude达到84%时，我们不能立即得出结论说GPT-4比Claude拥有更多“智能”或“能力”。必须首先回答几个问题：
+
+1. **MMLU测量的是什么潜在构念？** 是一般智能、事实知识、应试能力，还是完全不同的东西？
+
+2. **该构念是单维的吗？** 模型性能能否用一个单一数字来表征，还是不同的问题涉及不同的能力？
+
+3. **分数在不同测试条件下可比较吗？** 如果我们使用同一领域的不同问题，排名会改变吗？
+
+4. **测量误差是多少？** 分数差异中有多少反映的是真实的能力差异，又有多少是噪声？
+
+这些问题在心理学和教育领域已占据核心地位超过一个世纪。*心理测量学*领域发展了精密的工具——项目反应理论、因子分析、效度框架——正是为了解决这些问题。AI评估如今正面临同样的根本挑战。
+
+### 响应矩阵
+
+测量中的基本数据结构是*响应矩阵* $Y \in \{0, 1\}^{N \times M}$，其中：
+
+- 每一行 $i \in \{1, \ldots, N\}$ 代表一个*受试者*（在AI中：一个模型）
+- 每一列 $j \in \{1, \ldots, M\}$ 代表一个*项目*（在AI中：一道基准问题）
+- 每个条目 $Y_{ij} \in \{0, 1\}$ 表示受试者 $i$ 是否正确回答了项目 $j$
+
+$$
+Y = \begin{pmatrix}
+Y_{11} & Y_{12} & \cdots & Y_{1M} \\
+Y_{21} & Y_{22} & \cdots & Y_{2M} \\
+\vdots & \vdots & \ddots & \vdots \\
+Y_{N1} & Y_{N2} & \cdots & Y_{NM}
+\end{pmatrix}
+$$
+
+朴素的评估方法计算行均值（模型准确率）并据此对模型进行排名。但响应矩阵所包含的信息远多于这些边际统计量。响应的*模式*——哪些模型在哪些问题上表现成功——揭示了聚合分数所掩盖的结构。
+
+{{< include _plt_setup.qmd >}}
+
+```{pyodide-python}
+#| label: response-matrix-visualization
+#| autorun: true
+#| fig-cap: "语言模型评估的响应矩阵。行是模型（按总分排序），列是问题（按难度排序）。对角线结构暗示了潜在的能力和难度参数。"
+
+# Simulate a response matrix with Rasch model structure
+N, M = 50, 200  # 50 models, 200 questions
+
+# Generate latent abilities and difficulties
+theta = np.random.normal(0, 1, N)  # model abilities
+beta = np.random.normal(0, 1.5, M)  # question difficulties
+
+# Generate responses via Rasch model
+prob = 1 / (1 + np.exp(-(theta[:, None] - beta[None, :])))
+Y = (np.random.random((N, M)) < prob).astype(int)
+
+# Sort by row and column sums
+row_order = np.argsort(Y.sum(axis=1))[::-1]
+col_order = np.argsort(Y.sum(axis=0))[::-1]
+Y_sorted = Y[row_order][:, col_order]
+
+# Plot
+fig, ax = plt.subplots(1, 1)
+ax.imshow(Y_sorted, aspect='auto', cmap='Blues', interpolation='nearest')
+ax.set_xlabel('Questions (sorted by difficulty)')
+ax.set_ylabel('Models (sorted by ability)')
+ax.set_title('Sorted Response Matrix')
+
+plt.show()
+```
+
+当我们按行和（模型能力）与列和（题目难度）对响应矩阵进行排序时，会出现一种特征性的对角结构。高能力模型能正确回答大多数题目；简单题目能被大多数模型正确回答。这一结构并非必然存在——它取决于数据是否满足某些假设——但当它出现时，就表明一个简单的潜在变量模型可能足以描述这些数据。
+
+### 为什么AI评估需要测量科学
+
+当今AI评估面临的问题，与20世纪初心理学所面对的问题如出一辙：
+
+1. **构造定义：** 测量“推理”或“常识”究竟意味着什么？心理学发展出了效度框架来回答这一问题。
+
+2. **测验偏差：** 某些基准测试题目是否会因为训练数据或架构的原因而对某些模型不公平？教育测量开发了差异项目功能分析（DIF分析）。
+
+3. **分数可比性：** 我们能否将在不同基准测试子集上评估的模型进行比较？心理测量学开发了测验等值方法。
+
+4. **效率：** 如何用更少的题目对模型进行评估？基于项目反应理论（IRT）的计算机化自适应测验（CAT）应运而生。
+
+5. **信度：** 在不同条件下我们的排名有多稳定？重测信度和测量标准误对此进行了量化。
+
+心理测量学中开发出的工具不仅仅是类比——它们可以直接应用于AI评估。大型语言模型基准测试的响应矩阵与标准化测验的响应矩阵具有相同的结构。描述人类测验表现的统计模型，也能描述AI基准测试的表现。
+
+::: {.callout-note title="AIMS的核心主张"}
+AI基准测试在心理测量学意义上是测验。一个多世纪以来在教育与心理测量中发展出的方法——项目反应理论、因子分析、效度框架——可以直接应用于AI评估。理解并应用这些方法，对于实现可信的AI测量至关重要。
+:::
+
+
+### 本书使用的评估数据集 {#sec-datasets}
+
+贯穿本书，我们将使用若干大规模评估语料库，它们代表了衡量模型行为时既相互区别又相互补充的视角。这些数据集为我们的分析提供了实证基础。
+
+**HELM基准测试套件。** 我们使用了来自**5个HELM [@liang_holistic_2023]仓库**的**22个数据集**——包括*Classic*、*Lite*、*AIR-Bench*、*Thai Exam*和*MMLU*——涵盖了*能力*和*安全性*的测量。总的来说，这一集合包含**172名测试参与者**（模型）和**217,268道题目**。我们专注于可以二元评分（正确/错误）的回答，大多数基准测试都是如此，通过诸如*精确匹配*或*等价指标*等度量标准。为了确保估计的稳定性，我们移除了重复问题、具有相同回答模式的问题或测试参与者少于30个的问题；排除总回答数量少于30的测试参与者；并将未尝试的问题视为缺失值。
+
+**开放LLM排行榜。** 我们使用了来自**开放LLM排行榜**（Hugging Face, 2025）[@myrzakhan2024openllmleaderboard]的数据，这是一个公共基准测试平台，通过一套标准化的学术和实际任务来评估开源大型语言模型。该数据集包含了**2022年到2025年**之间提交的模型，覆盖了从小模型（<5B参数）到前沿系统（>140B参数）的参数规模。总共包含**4,416个不同的语言模型**，每个模型都针对来自六个套件的**21,176道基准题目**进行了评估：MMLU-Pro、OpenLLM-Math、MUSR、BBH、IFEval和GPQA。
+
+**LMarena偏好数据。** 除了基于正确性的评估之外，我们还纳入了来自**LMarena数据集** [@chiang2024chatbotarena]的**成对偏好数据**，该数据集提供了人类或自动化对模型相对质量的判断。每个示例对应一个同时展示给两个竞争模型的提示词，并带有一个注释指明哪个回答更受偏好。该数据集包含**211,728个唯一提示词**、**3,779对唯一模型对**和**179个不同模型**。这些偏好判断提供了一个补充视角，侧重于*相对比较*而非绝对正确性。
+
+**Agent排行榜。** 我们纳入了来自Galileo AI [@bhavsar2025agentleaderboard]的**Agent排行榜数据**，该排行榜评估大型语言模型在工具使用和推理场景下的*智能体表现*。该数据集包含大约**34,700行**，每一行对应于一个问题、模型的回答以及由GPT-4评判的数值分数。评估涵盖了多个智能体主题，每个主题大约有100道题目，包括大约**40个不同的模型**，如Gemini-2.5、Claude-3.5、GPT-4.1/4.5、Llama-4和Qwen-2.5等。
+
+这些四个来源共同实现了在统一的潜在因子评估框架内对*准确性*、*偏好*和*智能体能力*进行统一建模。
+
+
+## 测量中的概率模型 {#sec-probabilistic-models}
+
+测量需要一个将可观测反应与潜在构念联系起来的模型。本节概述了测量中使用的几类主要概率模型：项目反应理论（Item Response Theory）、因子模型（factor models）、配对比较系统（paired comparison systems）、网络模型（network models）和层次模型（hierarchical models）。这些模型提供了从反应数据中提取潜在变量的统计工具。
+
+### 项目反应理论 {#sec-irt}
+
+项目反应理论（IRT）将正确反应的概率建模为被测试者能力和项目特征的函数。其关键在于，人和项目都可以由同一尺度上的参数来表征。
+
+#### 拉希模型（1PL）
+
+最简单的 IRT 模型是**拉希模型（Rasch model）**，也称为单参数逻辑斯蒂（1PL）模型：
+
+::: {.callout-note title="定义：拉希模型"}
+$$
+P(Y_{ij} = 1 | \theta_i, \beta_j) = \frac{\exp(\theta_i - \beta_j)}{1 + \exp(\theta_i - \beta_j)} = \sigma(\theta_i - \beta_j)
+$$
+
+where:
+
+- $\theta_i \in \mathbb{R}$ 为被测试者 $i$ 的能力
+- $\beta_j \in \mathbb{R}$ 为项目 $j$ 的难度
+- $\sigma(\cdot)$ 为逻辑斯蒂 S 形函数
+:::
+
+该模型有一个优雅的解释：成功概率仅取决于能力与难度之间的*差异*。当 $\theta_i = \beta_j$ 时，概率恰好为 0.5——被测试者有 50% 的机会答对。当 $\theta_i > \beta_j$ 时，概率超过 0.5；当 $\theta_i < \beta_j$ 时，概率低于 0.5。
+
+::: {.callout-tip title="阅读板块图示" collapse="false"}
+在本章中，我们使用**板块图（plate diagrams）**（也称板块表示法）来可视化概率模型。约定如下：
+
+- **阴影（灰色）节点**表示*观测*变量（例如，响应 $Y_{ij}$）。
+- **开放（白色）节点**表示*潜在*（未观测）变量或参数（例如，能力 $\theta_i$）。
+- **箭头**表示概率依赖关系：从 $A$ 指向 $B$ 的箭头意味着 $B$ 的分布依赖于 $A$。
+- **板块**（矩形）表示重复：标有 "$i = 1, \ldots, N$" 的板块意味着其中的变量每索引 $i$ 重复一次，共重复 $N$ 次。
+
+嵌套的板块表示交叉或层次结构。例如，响应 $Y_{ij}$ 同时位于被试板块（$i$）和项目板块（$j$）内，表明每个被试-项目对有一个观测值。关于图模型的全面论述，参见 @koller2009pgm。
+:::
+
+![拉希模型的板块图。阴影节点为观测变量；开放节点为潜在变量。板块表示在被试（$i$）和项目（$j$）上的重复。](Figures/plate_rasch.png){#fig-rasch-plate width=50%}
+
+函数 $P(\theta) = \sigma(\theta - \beta)$ 被称为**项目特征曲线（Item Characteristic Curve，ICC）**。它描述了对于固定项目，成功概率如何随能力变化。
+
+```{pyodide-python}
+#| label: icc-rasch
+#| autorun: true
+#| fig-cap: "不同难度的Rasch模型项目的项目特征曲线。所有曲线形状（斜率）相同，仅位置不同。"
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+def sigmoid(x):
+    return 1 / (1 + np.exp(-x))
+
+theta = np.linspace(-4, 4, 200)
+difficulties = [-2, -1, 0, 1, 2]
+
+plt.figure()
+for beta in difficulties:
+    prob = sigmoid(theta - beta)
+    plt.plot(theta, prob, label=f'$\\beta = {beta}$', linewidth=2)
+
+plt.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+plt.xlabel('Ability ($\\theta$)', fontsize=12)
+plt.ylabel('$P(Y = 1)$', fontsize=12)
+plt.legend(title='Item Difficulty')
+plt.grid(True, alpha=0.3)
+plt.show()
+```
+
+#### 双参数 Logistic 模型（2PL）
+
+Rasch 模型假设所有项目具有相同的*区分度*——即相同的 ICC 斜率。**双参数 Logistic 模型**放宽了这一假设：
+
+::: {.callout-note title="定义：2PL 模型"}
+$$
+P(Y_{ij} = 1 | \theta_i, a_j, \beta_j) = \sigma(a_j(\theta_i - \beta_j))
+$$
+
+其中 $a_j > 0$ 是项目 $j$ 的区分度参数。
+:::
+
+区分度较高的项目更能有效地区分不同能力水平的被试。它们的 ICC 更加陡峭，意味着能力的微小变化就能引起作答概率的大幅变化。
+
+![2PL 模型的盘式图。每个项目现在同时拥有难度 $\beta_j$ 和区分度 $a_j$ 参数。](Figures/plate_2pl.png){#fig-2pl-plate width=50%}
+
+```{pyodide-python}
+#| label: icc-2pl
+#| autorun: true
+#| fig-cap: "不同区分度的2PL模型项目的项目特征曲线。更高的区分度（更陡的斜率）意味着该项目能更好地区分不同的能力水平。"
+
+theta = np.linspace(-4, 4, 200)
+
+# Items with same difficulty but different discriminations
+beta = 0
+discriminations = [0.5, 1.0, 1.5, 2.0]
+
+plt.figure()
+for a in discriminations:
+    prob = sigmoid(a * (theta - beta))
+    plt.plot(theta, prob, label=f'$a = {a}$', linewidth=2)
+
+plt.axhline(y=0.5, color='gray', linestyle='--', alpha=0.5)
+plt.axvline(x=0, color='gray', linestyle='--', alpha=0.5)
+plt.xlabel('Ability ($\\theta$)', fontsize=12)
+plt.ylabel('$P(Y = 1)$', fontsize=12)
+plt.title('2PL Model: Effect of Discrimination ($\\beta = 0$)', fontsize=14)
+plt.legend(title='Discrimination')
+plt.grid(True, alpha=0.3)
+plt.show()
+```
+
+#### 三参数逻辑斯蒂模型 (3PL)
+
+对于多项选择测试，即使是能力较低的考生也可能通过猜测答对题目。**三参数逻辑斯蒂模型**添加了一个下渐近线：
+
+::: {.callout-note title="定义：3PL模型"}
+$$
+P(Y_{ij} = 1 | \theta_i, a_j, \beta_j, c_j) = c_j + (1 - c_j) \sigma(a_j(\theta_i - \beta_j))
+$$
+
+其中 $c_j \in [0, 1]$ 是猜测（或伪随机）参数。
+:::
+
+对于一个有4个选项的多项选择题，如果低能力的考生随机猜测，我们可能期望 $c_j \approx 0.25$。
+
+![3PL模型的板块图。猜测参数 $c_j$ 在响应概率上设定了下渐近线。](Figures/plate_3pl.png){#fig-3pl-plate width=50%}
+
+```{pyodide-python}
+#| label: icc-3pl
+#| autorun: true
+#| fig-cap: "1PL、2PL 和 3PL 模型的比较。3PL 模型具有非零的下渐近线，代表猜测。"
+
+theta = np.linspace(-4, 4, 200)
+
+# Compare the three models
+a, beta, c = 1.5, 0, 0.25
+
+p_1pl = sigmoid(theta - beta)
+p_2pl = sigmoid(a * (theta - beta))
+p_3pl = c + (1 - c) * sigmoid(a * (theta - beta))
+
+plt.figure()
+plt.plot(theta, p_1pl, label='1PL (Rasch)', linewidth=2)
+plt.plot(theta, p_2pl, label='2PL', linewidth=2)
+plt.plot(theta, p_3pl, label='3PL', linewidth=2)
+
+plt.axhline(y=0.5, color='gray', linestyle='--', alpha=0.3)
+plt.axhline(y=c, color='gray', linestyle=':', alpha=0.5, label=f'Guessing = {c}')
+plt.xlabel('Ability ($\\theta$)', fontsize=12)
+plt.ylabel('$P(Y = 1)$', fontsize=12)
+plt.title('Comparison of IRT Models', fontsize=14)
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.show()
+```
+
+### 因子模型 {#sec-factor-models}
+
+因子模型为潜变量测量提供了另一种视角。虽然 IRT 关注项目级别的响应概率，但因子模型关注的是响应的协方差结构。
+
+#### 线性因子模型
+
+经典的线性因子模型假设观测变量是潜在因子的线性组合加上噪声：
+
+::: {.callout-note title="定义：线性因子模型"}
+$$
+X_j = \lambda_{j1} F_1 + \lambda_{j2} F_2 + \cdots + \lambda_{jK} F_K + \epsilon_j
+$$
+
+其中：
+
+- $X_j$ 是项目 $j$ 的观测得分
+- $F_k$ 是潜在因子（能力、特质）
+- $\lambda_{jk}$ 是因子载荷
+- $\epsilon_j$ 是与项目对应的误差
+:::
+
+用矩阵表示：$X = \Lambda F + \epsilon$，其中 $\Lambda$ 是 $M \times K$ 的因子载荷矩阵。
+
+#### 逻辑因子模型
+
+对于二元数据，我们使用逻辑链接函数：
+
+::: {.callout-note title="定义：逻辑因子模型"}
+$$
+P(Y_{ij} = 1 | U_i, V_j, Z_j) = \sigma(U_i^\top V_j + Z_j)
+$$
+
+其中：
+
+- $U_i \in \mathbb{R}^K$ 是个体 $i$ 的潜在因子向量
+- $V_j \in \mathbb{R}^K$ 是项目 $j$ 的因子载荷向量
+- $Z_j \in \mathbb{R}$ 是项目截距
+:::
+
+逻辑因子模型的参数与线性因子模型的参数直接对应：
+
+| 线性因子模型 | 逻辑因子模型 | 解释 |
+|---------------------|-----------------------|----------------|
+| 潜在因子 $F_k$ | $U_i \in \mathbb{R}^K$ 的各分量 | 个体 $i$ 在 $K$ 个因子上的能力 |
+| 因子载荷 $\lambda_{jk}$ | $V_j \in \mathbb{R}^K$ 的各分量 | 项目 $j$ 对因子 $k$ 的载荷强度 |
+| 项目特定误差 $\epsilon_j$ | 项目截距 $Z_j \in \mathbb{R}$ | 项目 $j$ 的基础容易度（类似于 IRT 中的 $-\beta_j$） |
+
+关键区别在于链接函数：线性模型对连续响应使用恒等链接($X_j = \ldots$)，而逻辑模型将线性预测项通过 sigmoid 函数 $\sigma(\cdot)$ 以获得二元响应的概率。
+
+这就是 AIMS 后续章节中用于多维 AI 评估的模型。
+
+![逻辑因子模型的板块图。潜在因子向量 $U_i$ 与项目特定的载荷 $V_j$ 和截距 $Z_j$ 交互以产生响应。](Figures/plate_factor.png){#fig-factor-plate width=50%}
+
+#### IRT 与因子分析的联系
+
+Rasch 模型等价于具有相等载荷的单因子逻辑模型：
+
+::: {.callout-note title="定理：Rasch-因子等价"}
+Rasch 模型 $P(Y_{ij} = 1) = \sigma(\theta_i - \beta_j)$ 等价于一个单因子逻辑模型，其中 $U_i = \theta_i$，对所有 $j$ 有 $V_j = 1$，且 $Z_j = -\beta_j$。
+:::
+
+更一般地，多维 IRT 模型与逻辑因子模型密切相关，主要区别在于参数化和估计方法。
+
+#### 结构矩阵 {#sec-structure-matrix}
+
+在拟合多维因子模型后，我们得到估计的题目载荷 $\hat{V}_j$，它们描述了每个题目与潜在因子之间的关系。然而，原始因子载荷需要标准化，以便在不同题目和基准之间进行有意义的比较。
+
+**结构矩阵** $S$ 刻画了每个题目的潜在响应与每个因子之间的相关性：
+
+::: {.callout-note title="定义：结构矩阵"}
+对于逻辑因子模型，潜在响应 $Y^*_{ij}$ 可以表示为 $Y^*_{ij} = U_i^\top V_j + Z_j + \epsilon_{ij}$，其中 $\epsilon_{ij}$ 服从逻辑分布，方差为 $\pi^2/3$。结构矩阵的元素 $S_{jk}$ 是题目 $j$ 的潜在响应与因子 $k$ 之间的相关系数：
+
+$$
+S_{jk} = \text{Cor}(Y^*_{ij}, U_{ik}) = \frac{(V_j^\top \Sigma)_k}{\sqrt{\Sigma_{kk}} \sqrt{V_j^\top \Sigma V_j + \pi^2/3}}
+$$
+
+其中 $\Sigma = \text{Cov}(U)$ 是因子协方差矩阵。
+:::
+
+**直观理解。** $S_{jk}$ 的公式是皮尔逊相关系数，因此其形式遵循标准定义 $\text{Cor}(A, B) = \text{Cov}(A, B) / (\text{SD}(A) \cdot \text{SD}(B))$。分子 $(V_j^\top \Sigma)_k$ 捕获了潜在响应 $Y^*_{ij} = U_i^\top V_j + Z_j + \epsilon_{ij}$ 与因子 $U_{ik}$ 之间的协方差：由于 $Z_j$ 和 $\epsilon_{ij}$ 与 $U$ 独立，仅 $U_i^\top V_j$ 项有贡献，从而得到 $\text{Cov}(U_i^\top V_j, U_{ik}) = (V_j^\top \Sigma)_k$。分母用 $\text{SD}(U_{ik}) = \sqrt{\Sigma_{kk}}$ 和 $\text{SD}(Y^*_{ij}) = \sqrt{V_j^\top \Sigma V_j + \pi^2/3}$ 进行标准化，其中 $\pi^2/3$ 项是逻辑误差 $\epsilon_{ij}$ 的方差。结果是一个 $[-1, 1]$ 的数值，可以跨题目直接比较，这与原始载荷 $V_j$ 不同，后者依赖于因子的任意尺度。详细的推导见 @sec-learning。
+
+我们将题目 $j$ 的**结构向量**定义为 $S_j = (S_{j1}, S_{j2}, \ldots, S_{jK})^\top \in \mathbb{R}^K$，其中每个元素 $S_{jk}$ 由上述公式给出。将这些行向量堆叠起来得到 $M \times K$ 的**结构矩阵** $S$，其第 $j$ 行是 $S_j^\top$。结构向量 $S_j$ 是题目 $j$ 的标准化指纹：它告诉我们该题目的潜在响应与每个因子的相关强度，采用 $[-1, 1]$ 尺度，可以在题目之间进行比较。
+
+结构矩阵具有几个重要性质：
+
+1. **有界值：** 每个元素 $S_{jk} \in [-1, 1]$，使得比较直观。
+2. **可解释性：** 高正值表明该题目主要测量该因子；负值表示反向关系。
+3. **聚类：** 具有相似结构向量的题目测量相似的结构，可以归为一组。
+
+对于 AI 基准测试，结构矩阵揭示了哪些问题涉及哪些能力。两个问题可能都是“正确/错误”，但负载在不同的因子上——一个测量推理能力，另一个测量事实回忆。这对我们如何解释总基准得分具有重要意义。
+
+#### 项目聚类与基准异质性 {#sec-item-clustering}
+
+有了结构矩阵，我们可以使用高斯混合模型（GMM）等标准聚类算法将项目聚类成潜在子群。每个聚类代表一组具有相似因子负载的项目——类似于基准中的“技能”或“主题”。这种方法类似于心理测量学中的探索性因子分析，揭示基准本质上是一维的还是由多个可能相互对抗的潜在技能组成。
+
+::: {.callout-important title="基准异质性"}
+将因子分析应用于 AI 基准的一个关键见解是：**基准很少是同质的**。无论有意还是无意，它们通常将测试不同能力的项目组合在一起，甚至单个基准项目也可能测试多种能力的组合。
+
+两个平均得分相同的模型可能在不同的能力维度上表现出色。例如，一个模型可能推理能力强但事实回忆弱，而另一个模型可能相反。当项目聚类彼此之间表现出弱相关或负相关时，基准级别的平均得分对子群表现既无信息也不准确。
+:::
+
+在每个基准内，我们可以通过以下方式量化结构间相关性：
+
+1. 基于结构向量使用 GMM 和 BIC 进行模型选择来**聚类项目**
+2. 为每个模型**计算聚类均值**（每个聚类中项目的平均准确率）
+3. 跨模型**关联聚类均值**以评估结构重叠
+
+强正的聚类间相关性表示重叠的结构，而弱相关或负相关则表明基准的平均得分汇总了截然不同且可能冲突的能力。这种多维模式解释了为什么两个总体准确率相同的模型可能在完全不同的技能轴上表现出色。
+
+因子模型为每个项目分配一个特征向量（结构向量），从而允许通过标准算法对项目进行聚类。这有助于解释那些否则会被总得分掩盖的评估结果。
+
+### 配对比较模型：Elo 和 Bradley-Terry {#sec-paired-comparison}
+
+并非所有测量数据都以项目响应的形式出现。在许多情境中，我们观察到*配对比较*：两个项目中哪个更受青睐，两个玩家中哪个获胜。这些情境需要不同的模型。
+
+#### Bradley-Terry 模型
+
+Bradley-Terry 模型（1952）是配对比较的基础模型：
+
+::: {.callout-note title="Definition: Bradley-Terry Model"}
+$$
+P(\text{item } i \text{ beats item } j) = \frac{\exp(\theta_i)}{\exp(\theta_i) + \exp(\theta_j)} = \sigma(\theta_i - \theta_j)
+$$
+
+其中 $\theta_i$ 是项目 $i$ 的“强度”或“质量”。
+:::
+
+该模型在数学形式上与Rasch模型相同，但解释不同：这里不是一个人回答一个项目，而是两个项目相互竞争。
+
+![Bradley-Terry模型的图版图。比较结果 $Y_c$ 取决于每一对中两名竞争者的强度 $\theta_i$ 和 $\theta_j$。](Figures/plate_bt.png){#fig-bt-plate width=50%}
+
+#### 埃洛评分系统 (Elo Rating System)
+
+由阿帕德·埃洛为国际象棋等级分开发的埃洛评分系统，本质上是一个带有在线更新的Bradley-Terry模型：
+
+::: {.callout-note title="Definition: Elo Rating System"}
+当具有评分 $R_i$ 的玩家 $i$ 与具有评分 $R_j$ 的玩家 $j$ 比赛后，评分进行更新：
+
+$$
+R_i^{\text{new}} = R_i + K(S_i - E_i)
+$$
+
+其中：
+
+- $S_i \in \{0, 0.5, 1\}$ 是实际结果（输、平、赢）
+- $E_i = \sigma((R_j - R_i)/400 \cdot \ln 10)$ 是预期结果
+- $K$ 是学习率参数
+:::
+
+埃洛系统广泛应用于竞技游戏中，并已被采纳用于AI评估，例如在Chatbot Arena等场景中，人类通过成对比较模型输出来进行评判。
+
+#### 与AI评估的联系
+
+Chatbot Arena (LMSYS) 使用埃洛评分基于人类偏好对语言模型进行排名。当用户偏好模型A的回复胜过模型B时，这被视为模型A的一次“胜利”。由此产生的评分提供了一个基于偏好的补充，与基于准确率的基准测试相辅相成。
+
+::: {.callout-note title="Chatbot Arena as Thurstone's Comparative Judgment"}
+Chatbot Arena 精确地实现了 L.L. Thurstone 于1927年提出的范式：通过成对比较来测量心理属性。Thurstone 开发这种方法是为了对态度、偏好和其他主观量进行标度。一个世纪后，同样的数学原理支撑着我们如何对AI系统进行排名。
+:::
+
+### 网络模型：GGM与Ising模型 {#sec-network-models}
+
+到目前为止讨论的模型都假设了一种*共同原因*结构：潜变量导致观测反应。网络模型提出了一种替代方案：观测变量之间直接相连，相关性源于这些连接而非共同的潜在原因。
+
+#### 高斯图模型 (GGM)
+
+对于连续数据，高斯图模型表示条件独立关系：
+
+::: {.callout-note title="Definition: Gaussian Graphical Model"}
+变量 $X = (X_1, \ldots, X_M)$ 遵循多元正态分布，其精度矩阵为 $\Omega = \Sigma^{-1}$。在给定所有其他变量的条件下，$X_j$ 与 $X_k$ 之间的偏相关系数为：
+
+$$
+\rho_{jk \cdot \text{rest}} = -\frac{\Omega_{jk}}{\sqrt{\Omega_{jj} \Omega_{kk}}}
+$$
+
+当且仅当 $\Omega_{jk} = 0$ 时，两个变量条件独立。
+:::
+
+GGM可以被可视化为一个网络，其中节点是变量，边代表非零偏相关。
+
+#### 伊辛模型
+
+对于二值数据，伊辛模型（借自统计物理学）提供了一个类似的框架：
+
+::: {.callout-note title="定义：伊辛模型"}
+$$
+P(Y = y) = \frac{1}{Z} \exp\left(\sum_j \tau_j y_j + \sum_{j < k} \omega_{jk} y_j y_k\right)
+$$
+
+其中：
+
+- $\tau_j$ 是阈值参数（类似于项目难度）
+- $\omega_{jk}$ 是交互参数（边权重）
+- $Z$ 是归一化常数
+:::
+
+**网络解释。** 伊辛模型在项目上定义了一个网络（无向图）：每个项目 $j$ 是一个节点，每个非零交互权重 $\omega_{jk}$ 是项目 $j$ 和 $k$ 之间的边。该网络捕捉*条件*依赖关系：$\omega_{jk} \neq 0$ 意味着，即使在所有其他项目的条件下，知道项目 $j$ 的回答也会改变项目 $k$ 正确回答的概率。
+
+概率中的两个求和项有不同的作用：
+
+- $\sum_j \tau_j y_j$ 是**节点项**：每个项目 $j$ 有一个阈值 $\tau_j$，其作用类似于项目难度。一个大的正值 $\tau_j$ 独立于其他项目，使得 $y_j = 1$（正确）更可能发生。
+- $\sum_{j < k} \omega_{jk} y_j y_k$ 是**边项**：它对所有*都*被正确回答的项目对的交互权重求和。一个正权重 $\omega_{jk} > 0$ 意味着项目 $j$ 和 $k$ 倾向于一起被正确回答（例如，它们共享一个相同的技能），而 $\omega_{jk} < 0$ 意味着一个项目的成功与另一个的失败相关联（例如，它们需要竞争性策略）。总边和捕捉了响应模式与依赖结构之间的整体“一致性”。
+
+在伊辛模型中，两个项目之间的相关性源于它们之间的直接连接 $\omega_{jk}$，而非来自一个共同的潜在因子。此外，相关性可以通过连接链传播：即使 $\omega_{jk} = 0$，如果存在一条由非零边组成的路径连接它们，项目 $j$ 和 $k$ 仍然可以相关。
+
+![伊辛模型的图模型。与潜变量模型不同，所有节点都是观测变量，相关关系源于直接的成对连接 $\omega_{jk}$。](Figures/plate_ising.png){#fig-network-diagram width=50%}
+
+#### 网络模型与潜变量模型
+
+在网络模型与潜变量模型之间的选择反映了关于观测相关性成因的不同理论：
+
+| 方面 | 潜变量模型 | 网络模型 |
+|--------|----------------------|---------------|
+| 相关性的成因 | 共同的潜在因子 | 直接连接 |
+| 移除一个项目 | 对其他相关性无影响 | 可能减小相关性 |
+| 理论承诺 | 构念存在并导致响应 | 构念是总结 |
+| 示例 | "智力" 导致良好表现 | 技能直接互为因果 |
+
+对于AI评估，问题在于基准测试项是共同能力（潜变量观）的指标，还是构成了一个由相关但不同的技能组成的网络（网络观）。这一区别对我们如何聚合各项表现有影响。
+
+::: {.callout-note title="哪种模型适合AI？"}
+潜变量模型与网络模型之间的选择不仅仅是技术性的——它反映了关于AI能力的不同信念：
+
+- **潜变量观：** 模型具有底层能力（推理、知识、语言理解），这些能力导致了它们的基准表现。
+- **网络观：** 基准测试项测量不同的技能，这些技能可能相互加强，但不共享共同原因。
+
+两种观点可能都部分正确。AIMS主要采用潜变量观，但承认某些基准测试项可能不适合这一框架。
+:::
+
+### 层次模型 {#sec-hierarchical-models}
+
+目前介绍的模型将所有项目视为可交换的——一组单一的项目参数进入似然函数，没有任何分组结构。在实践中，AI评估是*嵌套的*：项目属于基准测试，基准测试属于套件或领域，而套件可能被分组到更广泛的能力领域。层次（多水平）模型在模型规范中明确这种嵌套，将其作为数据生成过程的一部分，而不是分析的事后想法。
+
+::: {.callout-note title="定义：层次IRT模型"}
+考虑项目 $i$ 嵌套在基准测试 $j$ 中。Rasch模型的层次扩展规定：
+
+$$
+\text{logit}\, P(Y_{ij} = 1 \mid \theta, b_{ij}) = \theta - b_{ij}
+$$
+
+其中项目难度从基准测试级分布中抽取：
+
+$$
+b_{ij} \sim \mathcal{N}(\mu_j, \sigma_j^2)
+$$
+
+基准测试均值 $\mu_j$ 本身可能遵循领域级分布 $\mu_j \sim \mathcal{N}(\mu_0, \tau^2)$，形成三级层次结构：项目在基准测试内，基准测试在领域内。相同的层次扩展适用于2PL、3PL和因子模型。
+:::
+
+![层次IRT模型的板块图。项目难度 $b_{ij}$ 从由 $\mu_j$ 和 $\sigma_j$ 参数化的基准测试级分布中抽取，而这些参数本身可能从领域级超参数 $\mu_0$ 和 $\tau$ 中抽取。嵌套的板块反映了层次数据结构。](Figures/plate_hierarchical.png){#fig-hierarchical-plate width=50%}
+
+是否包含层次结构是一个*建模*选择，类似于在1PL和2PL之间的决定。它编码了这样一个假设：同一基准测试内的项目共享难度特征——它们的参数不是来自单一全局分布的独立抽取，而是按基准测试聚类。忽略这种结构并将所有项目视为可交换，会混淆基准内和基准间的变异，产生可能无法推广到具体观察项目以外的估计值 [@luettgau2025hibayes]。
+
+::: {.callout-note title="AI评估中的层次结构"}
+现代AI评估在多个层面上呈现出自然的层次结构：
+
+- **MMLU：** 15,908个题目 $\to$ 57个学科 $\to$ 4个领域（人文学科、社会科学、STEM、其他）
+- **GAIA：** 智能体任务 $\to$ 3个难度级别 $\to$ 能力领域
+- **编程基准：** 问题 $\to$ 基准（HumanEval、MBPP、DS-1000）$\to$ 编程能力
+
+对这些层级进行显式建模，能够分离每个层面上的变异来源。这使我们能够从实际测试的基准，有针对性地推广到它们旨在测量的更广泛构念上。分层模型的估计方法（包括部分池化和贝叶斯推断）将在第2章介绍。
+:::
+
+
+## 作为“测量模型”的拉希模型 {#sec-rasch-measurement}
+
+在众多用于测量的概率模型中，拉希模型占有特殊的地位。乔治·拉希及其追随者认为，它不仅仅是众多模型中的*一种*测量模型——而是*唯一的*测量模型，是唯一满足基本测量要求的模型。本节将详细审视这一主张。
+
+### 总分的充分性 {#sec-sufficiency}
+
+拉希模型最显著的特性是，**总分是能力参数的充分统计量**。这意味着正确回答的总数包含了关于个人能力的全部信息；知道*哪些*题目答对了不会提供额外信息。
+
+::: {.callout-note title="定理：拉希模型中的充分性"}
+在拉希模型中，总分 $S_i = \sum_{j=1}^M Y_{ij}$ 是能力参数 $\theta_i$ 的一个充分统计量。也就是说：
+
+$$
+P(Y_i | S_i, \theta_i) = P(Y_i | S_i)
+$$
+
+给定总分条件下，响应模式的条件分布不依赖于 $\theta$。
+:::
+
+::: {.callout-note title="证明" collapse="true"}
+响应模式 $Y_i = (Y_{i1}, \ldots, Y_{iM})$ 的联合概率为：
+
+$$
+P(Y_i | \theta_i, \boldsymbol{\beta}) = \prod_{j=1}^M \frac{\exp(Y_{ij}(\theta_i - \beta_j))}{1 + \exp(\theta_i - \beta_j)}
+$$
+
+展开得：
+
+$$
+= \frac{\exp(\theta_i \sum_j Y_{ij}) \cdot \exp(-\sum_j Y_{ij} \beta_j)}{\prod_j (1 + \exp(\theta_i - \beta_j))}
+$$
+
+$$
+= \frac{\exp(\theta_i S_i) \cdot \exp(-\sum_j Y_{ij} \beta_j)}{\prod_j (1 + \exp(\theta_i - \beta_j))}
+$$
+
+似然函数可分解为 $L(\theta | Y) = g(S, \theta) \cdot h(Y, \boldsymbol{\beta})$，其中 $g$ 仅通过 $S$ 依赖于 $\theta$。
+
+根据因子分解定理，$S$ 是 $\theta$ 的充分统计量。
+
+要看出条件分布 $P(Y_i | S_i)$ 不依赖于 $\theta$：
+
+$$
+P(Y_i | S_i, \theta_i) = \frac{P(Y_i | \theta_i, \boldsymbol{\beta})}{P(S_i | \theta_i, \boldsymbol{\beta})}
+$$
+
+分子和分母都包含因子 $\exp(\theta_i S_i)$，当 $S_i$ 固定时该因子会约掉。
+:::
+
+#### 充分性为何重要
+
+充分性具有深远的意义：
+
+1. **数据缩减而不损失信息。** 我们可以将每个人的回答概括为一个数字（总分），而不会丢失任何关于其能力的信息。
+
+2. **总分的合理性。** 计算总分的常见做法*只有*在 Rasch 模型成立的情况下才有依据。在其他模型下，总分会导致信息丢失。
+
+3. **条件推断。** 我们可以通过条件化充分统计量来估计项目参数，而不需知道个体参数，反之亦然。
+
+::: {.callout-note title="充分性与人工智能基准"}
+当我们计算模型在某个基准上的准确率时，我们实际上是在计算一个总分（正确比例 = 总分 / 项目数）。如果 Rasch 模型成立，这样做是合适的。但如果各项目的区分度不同，总分就会丢失信息——我们本应对某些项目赋予更高的权重。
+
+启示：在信赖聚合的基准得分之前，我们应当检验 Rasch 模型是否拟合数据。
+:::
+
+::: {.callout-tip title="应用：利用充分性发现基准中的缺陷"}
+@truong2025bugs 将充分性这一性质转化为一种实用的诊断工具。他们的论点是：如果人工智能评估社区以均分作为主要指标，那就*隐含地假设*总分是能力的充分统计量——根据上述定理，这意味着数据生成过程是 Rasch 模型。在 Rasch 模型下，可得出以下两个可检验的推论：
+
+1. **正的四分相关系数。** 所有项目间的四分相关必须非负（Chebyshev 不等式应用于同一潜变量 $\theta$ 的递增函数的推论）。
+2. **正的项总相关系数。** 每个项目都必须与总分正相关。
+
+违背这些条件的项目——负的四分相关、负的项总相关或较低的 Mokken 量纲化系数——将被标记为潜在无效。将这一方法应用于包括 GSM8K 和 MMLU 在内的九个基准后，@truong2025bugs 在前 50 个被标记项目中取得了高达 84% 的精确率：在 50 个最可疑的问题中，多达 42 个被人类专家确认无效。常见错误包括模糊的措辞、错误的答案标准（例如，将指数折旧当作线性处理）、评分错误（例如，“\$7.00” $\neq$ “7”）以及文化嵌入的假设。
+
+这揭示了一个更广泛的原理：测量模型的数学性质并非仅仅是理论上的——它们能为评测质量提供*可操作的*诊断。当数据违背模型预测时，要么模型错了，要么数据被污染了。鉴于充分性假设已隐含在社区使用基准的方式中，违背这一假设就是项目层面存在问题的强有力证据。
+:::
+
+
+### 特定客观性 {#sec-specific-objectivity}
+
+Georg Rasch 的核心贡献并非数学模型本身（此前已有人提出），而是**特定客观性**的哲学框架。
+
+::: {.callout-note title="定义：特定客观性"}
+如果一个测量程序使得个人之间的比较独立于所使用的题目，那么它就表现出**特定客观性**：
+
+$$
+\frac{P(Y_{ij} = 1)}{P(Y_{ij} = 0)} \bigg/ \frac{P(Y_{kj} = 1)}{P(Y_{kj} = 0)} = \frac{\exp(\theta_i)}{\exp(\theta_k)}
+$$
+
+题目参数 $\beta_j$ 完全抵消。类似地，题目之间的比较也独立于所使用的个人。
+:::
+
+在 Rasch 模型中，两个人在同一题目上的优势比为：
+
+$$
+\frac{P(Y_{ij} = 1) / P(Y_{ij} = 0)}{P(Y_{kj} = 1) / P(Y_{kj} = 0)} = \frac{\exp(\theta_i - \beta_j)}{\exp(\theta_k - \beta_j)} = \exp(\theta_i - \theta_k)
+$$
+
+题目难度 $\beta_j$ 抵消了！这意味着无论使用哪个题目，个人比较的结果都相同。
+
+Rasch 确定了两个层次的客观性：
+
+1. **局部客观性：** 对于特定的一对个人，比较是独立于题目的。
+
+2. **一般客观性：** 整个能力量表是独立于样本的。无论施测了哪些题目，能力估计值都保持有效。
+
+### 免测试与免样本测量 {#sec-test-free}
+
+特定客观性使得 Rasch 所称的**免测试的个人测量**和**免样本的题目校准**成为可能：
+
+- **免测试的个人测量：** 一个人的能力可以从*任何*已校准的题目子集中估计出来，且估计值（在抽样误差范围内）相同。
+
+- **免样本的题目校准：** 一个题目的难度可以从*任何*个人样本中估计出来，且估计值相同。
+
+这非常了不起，因为它反映了物理测量的特性：
+
+::: {.callout-note title="模拟物理测量"}
+考虑使用不同的温度计测量温度：
+
+- 在相同温度下，纽约的水银温度计应该与伦敦的酒精温度计给出相同的读数。
+- 用热水校准温度计得到的参数，对冷水也应同样适用。
+
+Rasch 模型声称心理测量具有相同的特性：已校准的测试无论使用哪些具体题目，都能得到相同的能力估计值。
+:::
+
+#### 对 AI 评估的启示
+
+如果 AI 基准测试满足 Rasch 模型的假设：
+
+1. **基准子集比较是有效的。** 我们可以将在一个 MMLU 子集 A 上测试的模型与在另一个 MMLU 子集 B 上测试的模型进行比较，只要两个子集都已校准到同一量表。
+
+2. **新问题可以在任何模型上进行校准。** 我们可以通过在一组模型样本上测试新问题，将其添加到基准中，然后用于评估未来的模型。
+
+3. **自适应测试成为可能。** 我们可以根据模型的表现动态选择问题，从而用更少的问题得到准确的能力估计值。
+
+4. **跨基准测试的比较也许是可能的。** 如果不同的基准测试测量同一个结构，我们就能将它们的量表等值。
+
+这些性质并非保证成立的——它们仅在 Rasch 模型拟合数据时成立。检验模型拟合就变得至关重要。
+
+### Rasch 与通用 IRT 之争 {#sec-rasch-debate}
+
+声称 Rasch 是“那个”测量模型的说法存在争议。争论的核心是测量的 **规定性 vs 描述性** 方法。
+
+#### 规定性方法（Rasch 学派）
+
+Rasch 学派主张：
+
+1. **测量需要特定客观性（specific objectivity）。** 没有它，我们就无法做出独立于所用测验的个人比较。
+
+2. **模型是一项要求，而非描述。** 如果数据不拟合 Rasch 模型，那么这些项目就不能测量同一个结构。我们应该丢弃不拟合的项目，而不是采用更复杂的模型。
+
+3. **区分度变异是一个问题，而非特征。** 具有不同区分度的项目以不同的精确度测量结构。将它们混在一起会产生一个异质测验，无法测量单一事物。
+
+4. **充分性（sufficiency）是不可妥协的。** 总分必须对能力是充分的，否则我们就没有测量任何有意义的东西。
+
+#### 描述性方法（通用 IRT）
+
+通用 IRT 学派回应道：
+
+1. **模型应当拟合数据。** 统计模型的目的就是精确描述数据。如果项目有不同的区分度，我们应该对此建模，而非无视它。
+
+2. **完美拟合是不现实的。** 真实数据从未完美拟合任何模型。Rasch 学派对精确拟合的坚持是不切实际的。
+
+3. **强行使用 Rasch 会丢失信息。** 丢弃不拟合 Rasch 的项目意味着丢弃信息。更好的做法是使用所有项目并对其特征建模。
+
+4. **2PL/3PL 模型更现实。** 大多数测验的项目都有不同的区分度和猜测。假装不是这样并不能使其变为真实。
+
+::: {.callout-note title="The Fundamental Tension"}
+**规定性观点：** Rasch 模型定义了测量是什么。不拟合的项目应被丢弃，因为它们测量的不是同一个东西。
+
+**描述性观点：** 使用最能拟合数据的模型。2PL/3PL 模型对大多数应用场合更现实。
+
+这不仅仅是统计上的分歧——它反映了不同的科学哲学。Rasch 学派将测量理论视为提供数据必须满足的 *要求*。IRT 学派则视模型为基于拟合度进行选择的 *工具*。
+:::
+
+#### 对 AI 评估的启示
+
+这场争论对 AI 基准设计有直接影响：
+
+| 问题 | Rasch学派答案 | 一般IRT答案 |
+|----------|--------------------|--------------------|
+| 应该允许项目有不同的区分度吗？ | 否——它们测量不同的构念 | 是——对区分度建模 |
+| 如果数据不符合Rasch模型怎么办？ | 删除不拟合的项目 | 使用2PL或3PL |
+| 总分是合适的度量吗？ | 是，如果Rasch模型拟合 | 仅近似如此 |
+| 可以跨基准比较模型吗？ | 可以，用Rasch模型 | 需要复杂的等值化 |
+
+AIMS采取实用主义立场：我们检验数据是否符合类Rasch模型，在模型充分拟合时使用更简单的模型，并在需要更复杂模型时如实承认。关键见解在于，这种选择对我们从评估结果中得出的结论具有*实质性影响*。
+
+
+## 历史发展 {#sec-history}
+
+我们今天使用的概率模型源于心理学、教育学、经济学和统计学超过一个世纪的研究工作。理解这段历史有助于阐明为何某些模型占据主导，以及它们旨在解决什么问题。
+
+### 瑟斯顿的比较判断法则（1927） {#sec-thurstone}
+
+故事始于芝加哥大学的 L.L. 瑟斯顿。1927 年，瑟斯顿提出了一个描述人们如何进行配对比较的模型：**比较判断法则** [@thurstone]。
+
+瑟斯顿的洞见在于，主观量（偏好、态度、感知到的刺激）可以通过分析配对比较的模式被置于数值尺度上。如果我们询问许多人刺激 A 是否大于刺激 B，并记录回答“是”的比例，就能推断出潜在的尺度值。
+
+::: {.callout-note title="瑟斯顿模型（案例 V）"}
+每个刺激 $i$ 都有一个真实尺度值 $\theta_i$。当比较刺激 $i$ 和 $j$ 时，每个刺激的感知都带有高斯噪声：
+
+$$
+\tilde{\theta}_i \sim N(\theta_i, \sigma^2), \quad \tilde{\theta}_j \sim N(\theta_j, \sigma^2)
+$$
+
+$i$ 被判断为大于 $j$ 的概率为：
+
+$$
+P(i \succ j) = \Phi\left(\frac{\theta_i - \theta_j}{\sqrt{2}\sigma}\right)
+$$
+
+其中 $\Phi$ 是标准正态累积分布函数。
+:::
+
+瑟斯顿的方法是革命性的：它表明主观量可以被科学地测量。如今，同样的数学原理支撑着如何根据人类偏好对人工智能系统进行排名。
+
+### 布拉德利-特里与卢斯（1952–1959） {#sec-bradley-terry-history}
+
+1952 年，拉尔夫·布拉德利和米尔顿·特里在不完全区组设计的背景下，提出了一个用于根据配对比较进行排名的模型 [@bradley-terry-model]。他们的模型为：
+
+$$
+P(i \succ j) = \frac{\pi_i}{\pi_i + \pi_j}
+$$
+
+其中 $\pi_i > 0$ 是“价值”参数。令 $\theta_i = \log \pi_i$，它就变成了熟悉的逻辑斯蒂形式。
+
+1959 年，R. 邓肯·卢斯通过其**选择公理**提供了公理化基础：两个选项的选择概率之比应与其他可用选项无关。这一公理直接导向了布拉德利-特里/逻辑斯蒂模型。
+
+### 乔治·拉什与丹麦学派（1960）{#sec-rasch-history}
+
+乔治·拉什（Georg Rasch）是一位丹麦数学家，专注于教育测验中的问题。1960年，他发表了《某些智力和成就测验的概率模型》，其中引入了我们现在所称的拉什模型 [@rasch1960probabilistic]。
+
+拉什的贡献并非数学模型本身——同样的公式早先已在其他领域出现过。他的贡献在于*特定客观性*这一哲学框架：即要求被试参数与项目参数必须可分离。
+
+拉什的成果由芝加哥大学的本杰明·赖特（Benjamin Wright）引入美国，他于1960年聆听了拉什的讲座。赖特成为英语世界拉什测量的主要倡导者，创立了MESA（测量、评估、统计分析）项目和期刊《拉什测量汇刊》*Rasch Measurement Transactions*。
+
+拉什传统中的其他重要人物：
+
+- **厄林·安德森**（Erling Andersen，哥本哈根）：发展了拉什模型的条件最大似然估计理论。
+- **格哈德·费希尔**（Gerhard Fischer，维也纳）：将拉什模型扩展为线性逻辑测试模型（LLTM）并开发了估计软件。
+- **戴维·安德里奇**（David Andrich，澳大利亚）：将拉什模型扩展到多分类数据（评定量表）并开发了RUMM软件。
+
+### 麦克法登与计量经济学（1974）{#sec-mcfadden}
+
+1974年，丹尼尔·麦克法登（Daniel McFadden，后来获得诺贝尔经济学奖）提出了离散选择的随机效用框架。他的洞见是，选择可以建模为带有随机误差的效用最大化：
+
+当 $U_i + \epsilon_i > U_j + \epsilon_j$ 时，人们会选择备选项 $i$ 而非 $j$，其中 $U$ 为确定性效用，$\epsilon$ 为随机误差。若误差独立同分布于Gumbel分布，则得到逻辑选择模型 [@mcfadden1974conditional]。
+
+麦克法登的工作将偏好模型与经济学联系起来，并为Bradley-Terry模型提供了理论依据：它源于特定分布假设下的随机效用最大化。
+
+### 现代发展 {#sec-modern-developments}
+
+**网络心理测量学（2010年代）：** 博尔斯博姆（Borsboom）及其同事提出，心理构念或许更适合理解为因果关联的症状网络，而非潜在变量的反映 [@borsboom2013network]。伊辛模型和高斯图模型为这一视角提供了统计工具。
+
+**人工智能评估（2020年代）：** 心理测量方法应用于人工智能评估是近年来的事。关键进展包括：
+
+- Chatbot Arena 使用Elo评分对LLM进行排名 [@chiang2024chatbotarena]
+- 将IRT应用于基准分析 [@polo2024tinybenchmarks]
+- 针对人工智能能力的多维度因素模型（本书）
+
+::: {.callout-note title="关键历史论文"}
+
+**基础文献：**
+
+- @thurstone . 比较判断定律。*心理学评论*, 34, 273-286.
+- @bradley-terry-model . 不完全区组设计的排序分析。*生物统计学*, 39, 324-345.
+- @luce1959individual . *个体选择行为：一个理论分析*。Wiley.
+- @rasch1960probabilistic . *某些智力和成就测验的概率模型*。丹麦教育研究院。
+- @mcfadden1974conditional . 定性选择行为的条件逻辑分析。载于*计量经济学前沿* (第105–142页)。学术出版社。
+
+**现代：**
+
+- @borsboom2005measuring . *测量心智：当代心理测量学中的概念问题*。剑桥大学出版社。
+- @epskamp2018gaussian . 横截面与时间序列数据中的高斯图模型。*多元行为研究*, 53, 453-480.
+:::
+
+
+## 从心理学到人工智能：测量科学的迁移 {#sec-transfer}
+
+本节将心理学和教育学中发展起来的概念直接迁移到人工智能评估中，并明确其对应关系，同时强调两者的相似与差异。
+
+### 映射表
+
+| 心理学/教育 | AI评估 | 符号 |
+|---------------------|---------------|--------|
+| 测试被试（个人，受试者） | AI模型 | $i$ |
+| 测试项目（问题，题目） | 基准问题 | $j$ |
+| 能力、特质、潜在构念 | 能力、技能 | $\theta_i$ 或 $U_i$ |
+| 项目难度 | 问题难度 | $\beta_j$ 或 $V_j$ |
+| 项目区分度 | 问题信息量 | $a_j$ |
+| 反应（正确/错误） | 模型输出（正确/错误） | $Y_{ij}$ |
+| 测验（项目集合） | 基准（问题集合） | - |
+| 总分（正确数） | 准确率 | $S_i$ |
+| 信度 | 评估一致性 | - |
+| 效度 | 衡量目标能力 | - |
+| 测验偏差（DIF） | 基准污染/偏差 | - |
+| 自适应测验（CAT） | 高效评估 | - |
+
+### 关键对应点
+
+**信度。** 在教育测验中，信度是指分数在不同条件下的一致性：
+
+- *再测信度：* 同一个人重复测验会得到相同分数吗？
+- *内部一致性：* 测验中的各个项目之间是否相关？
+- *测量标准误：* 分数估计有多精确？
+
+对于AI评估：
+
+- *运行间一致性：* 同一模型使用不同随机种子会得到相同分数吗？
+- *项目一致性：* 基准问题之间是否相关？
+- *置信区间：* 准确率估计的不确定性有多大？
+
+**效度。** 在教育测验中，效度关注测验是否测量了其声称要测量的内容：
+
+- *内容效度：* 项目是否充分代表了该领域？
+- *校标效度：* 分数能否预测相关结果？
+- *构念效度：* 分数的行为是否符合理论预测？
+
+对于AI评估：
+
+- *内容效度：* 基准测试是否覆盖了预期的能力领域？
+- *效标效度：* 基准测试的表现能否预测实际效用？
+- *结构效度：* 得分高的模型是否真正具备了预期的能力？
+
+**公平性与偏差。** 在教育测试中，项目功能差异（DIF）分析用于检查题目是否对某些群体存在偏差：
+
+- 如果具有相同能力但属于不同群体的人答对题目的概率不同，则一个题目会显示出DIF。
+
+对于AI评估：
+
+- *训练数据污染：* 某些模型在训练过程中是否见过了测试问题？
+- *架构偏差：* 某些问题是否对特定模型架构更容易？
+- *提示敏感性：* 不同的提示格式是否会使某些模型更占优势？
+
+### 关键差异
+
+虽然数学框架可以直接迁移，但有一些差异值得注意：
+
+1. **题目数量。** 心理测验通常有几十到几百道题目。AI基准测试可能有数千甚至数十万道题目。这会影响估计和模型拟合。
+
+2. **确定性响应。** 人类受试者表现出随机变化——他们可能在不同场合对同一问题给出不同答案。AI模型（温度为0时）通常是确定性的。这改变了解释概率模型的方式。
+
+3. **构念定义。** 像“智力”或“焦虑”这样的心理构念有大量理论文献。像“推理”或“常识”这样的AI能力定义则不够明确。
+
+4. **变化速度。** 人类能力变化缓慢。AI能力可能随着每个模型版本的发布而发生剧烈变化。这会影响校准的稳定性。
+
+5. **总体结构。** 人类总体具有已知的人口统计结构。AI模型的“总体”是任意的——由研究人员选择评估哪些模型决定。
+
+### 案例研究：聊天机器人竞技场
+
+聊天机器人竞技场（Chatbot Arena, LMSYS）[@liang_holistic_2023] 提供了一个将测量概念应用于AI的具体例子：
+
+**场景：** 用户与两个匿名的语言模型交互，并投票选出他们更偏好的一个。模型根据这些成对比较计算出的Elo评分进行排名。
+
+**测量框架：** 这正是1927年瑟斯顿的比较判断范式。Elo评分系统实现了带有在线更新的Bradley-Terry最大似然估计。
+
+**效度问题：**
+
+- 评分测量的是什么构念？“人类偏好”是模糊的。偏好什么——有用性、无害性、风格、事实准确性？
+- 评分在不同用户群体之间是否稳定？
+- 评分是否能预测在其他基准测试或现实世界任务上的表现？
+
+**信度问题：**
+
+- 需要多少次比较才能获得稳定的评分？
+- 评分对所使用的特定提示有多敏感？
+- 当新模型进入竞技场时，评分是否会波动？
+
+The Arena demonstrates both the power and limitations of measurement approaches. The Elo ratings provide a principled summary of human preferences, but interpreting what they mean requires the full apparatus of validity theory.
+
+## Amortized Models and Neural Collaborative Filtering {#sec-cold-start}
+
+The factor models introduced in @sec-factor-models learn a latent parameter vector for each person ($U_i$) and each item ($V_j$, $Z_j$) by optimizing over the observed response matrix. This works well when we have enough responses for every entity, but it has two limitations: (1) the number of parameters grows linearly with the number of persons and items, and (2) new persons or items that were not present during training have no learned representation. **Amortized models** address both limitations by replacing per-entity parameter optimization with a learned function that maps observable features to latent parameters.
+
+### From Per-Entity to Amortized Parameters
+
+In the standard factor model, each item $j$ has its own learned parameters $V_j$ and $Z_j$. An amortized model instead learns a function $f_\theta$ that predicts these parameters from item features:
+
+$$
+[\hat{V}_j, \hat{Z}_j] = f_\theta(x_j)
+$$
+
+where $x_j$ is a feature vector for item $j$ (e.g., a text embedding of the question). Similarly, person parameters can be amortized via a function $g_\phi$:
+
+$$
+\hat{U}_i = g_\phi(m_i)
+$$
+
+where $m_i$ is a feature vector for person $i$ (e.g., model metadata such as parameter count, architecture family, and release date). The predicted correctness probability is then:
+
+$$
+\hat{P}_{ij} = \sigma(\hat{U}_i^\top \hat{V}_j + \hat{Z}_j)
+$$
+
+The key advantage is that $f_\theta$ and $g_\phi$ generalize to *new* items and persons not seen during training, as long as their features are available.
+
+### Neural Collaborative Filtering
+
+Amortized measurement models are closely related to **neural collaborative filtering** (NCF), a family of methods from recommendation systems that use neural networks to model user-item interactions. In the recommender systems literature, the response matrix $Y$ records user preferences (ratings, clicks); in our setting, it records model correctness. Both problems share the same structure: predicting missing entries of a sparse matrix.
+
+Classical matrix factorization decomposes the response matrix as $Y \approx U V^\top + Z$, which is exactly the logistic factor model from @sec-factor-models without the sigmoid. NCF extends this by replacing the inner product $U_i^\top V_j$ with a neural network $h_\psi(U_i, V_j)$ that can learn non-linear interactions between person and item latent factors. In the measurement context, this corresponds to replacing the linear logit $U_i^\top V_j + Z_j$ with a more flexible function:
+
+$$
+P(Y_{ij} = 1) = \sigma(h_\psi(U_i, V_j, Z_j))
+$$
+
+这种增加的灵活性可以捕捉复杂的交互模式——例如，一个在推理方面很强但在多步算术方面特别弱的模型——而线性因子模型将需要很多维度来近似。代价是可解释性降低：潜在因子不再具有作为“能力轴”的清晰几何解释。
+
+::: {.callout-note title="NCF 与摊销模型"}
+神经协同过滤和摊销模型解决互补的问题。NCF使用神经网络来建模潜在因子之间的*交互*（用学习到的函数替换 $U_i^\top V_j$）。摊销模型使用神经网络从特征中*预测*潜在因子（用可观察特征的函数替换每个实体的 $U_i$, $V_j$）。这两种思想可以结合：使用摊销编码器产生潜在因子，然后使用神经交互函数来产生预测。
+:::
+
+### 预测驱动的评估
+
+**预测驱动的评估（PPE）**是摊销方法在AI评估中的一个具体实例。该流程分为三个阶段：
+
+**阶段1——因子模型预训练。** 使用 @sec-factor-models 中的因子模型，从观测到的响应数据 $Y_{ij}$ 中学习潜在行为因子 $(U, V, Z)$：
+
+$$
+p(Y_{ij}=1 \mid U_i, V_j, Z_j) = \sigma(U_i^\top V_j + Z_j)
+$$
+
+**阶段2——摊销映射。** 训练两个并行的预测器：
+
+- **题目侧预测器** $f_\theta$：将题目嵌入 $E_j \in \mathbb{R}^{4096}$ 映射为潜在参数 $[\hat V_j, \hat Z_j] = f_\theta(E_j)$
+- **模型侧预测器** $g_\phi$：将模型元数据 $F_i \in \mathbb{R}^{24}$（规模、架构、发布时间）映射为 $\hat U_i = F_i W_U$
+
+题目预测器是一个神经网络，使用阶段1中固定的 $U$ 以伯努利对数似然进行训练。模型预测器则是一个简单的线性变换，以保证可解释性。
+
+**阶段3——零样本评估。** 给定一个新的模型或题目，从其元数据/嵌入中预测潜在参数，并重建正确概率：
+
+$$
+\hat P_{ij} = \sigma(\hat U_i^\top \hat V_j + \hat Z_j)
+$$
+
+| **组件**               | **输入**                       | **输出**                   | **目的**                                         |
+|------------------------|-------------------------------|----------------------------|--------------------------------------------------|
+| 因子模型               | 响应矩阵 $Y$                   | $U, V, Z$                  | 提取潜在行为结构                                 |
+| 语义预测器             | 题目嵌入 $E_j$                  | $[\hat V_j, \hat Z_j]$     | 泛化到未见过的问题                               |
+| 模型预测器             | 元数据 $F_i$                    | $\hat U_i$                 | 泛化到未见过的模型                               |
+| 正确性预测器           | $\hat U_i, \hat V_j, \hat Z_j$  | $\hat P_{ij}$              | 在不运行评估的情况下预测正确性                   |
+
+### 语义—行为鸿沟
+
+一个自然的期望是问题之间的语义相似性意味着行为相似性：如果两个问题具有相似的嵌入，模型可能会对它们做出类似的响应。然而，这种直觉具有误导性。即使近乎相同的嵌入（余弦相似度 > 0.99）也表现出近乎随机的行为相关性（$-1$ 到 $+1$），表明语义邻近并*不*意味着行为等价。这一差距推动了上述两阶段方法：首先从响应数据中学习一个*行为*潜空间，然后学习将语义特征映射到该空间。
+
+### 迭代过滤
+
+在训练PPE流水线之前，我们可以通过移除对抗性或不一致的项目来提高项目间一致性。**迭代过滤**重复计算四分相关，并移除负相关比例最高的项目。过滤后，负相关比例通常从约23%下降到2%以下，同时保留约一半的原始项目。对PPE流水线在保留数据上的实证评估见 @sec-learning。
+
+
+## 总结与预览 {#sec-summary}
+
+本章介绍了构成AIMS其余部分基础的测量科学框架。关键思想是：
+
+### 关键要点
+
+1. **测量需要的不仅仅是评分。** 根据基准性能为模型分配数字属于评分，而非测量。测量需要一种将分数与潜在构念联系起来的理论。
+
+2. **效度至关重要。** 只有当构念存在并且因果性地导致分数的变异时，基准才测量该构念。效度的哲学和诊断基础在 @sec-validity 中阐述。
+
+3. **Rasch模型具有特殊性质。** 总分充分性和特定客观性使得Rasch模型特别适合基本测量。这些性质为将总分视为测量提供了依据。
+
+4. **存在适用于不同目的的多种模型。** 项目反应理论（IRT）模型（1PL、2PL、3PL）、因子模型、配对比较模型（Bradley-Terry、Elo）、网络模型（GGM、Ising）以及层次模型服务于不同目的。模型的选择——包括是否表示嵌套评估结构——对我们能得出的结论有影响。
+
+5. **心理学在几十年前就解决了这些问题。** 心理测量学中开发的工具——信度、效度、维度分析、自适应测试——可直接应用于AI评估。
+
+### 后续章节预览
+
+接下来的章节将此框架应用于特定的AI评估挑战：
+
+- **第2章（学习）：** 涵盖IRT和因子模型的参数估计，包括最大似然、EM算法、贝叶斯推断、正则化以及模型选择。还展开了泛化实验——评估学习到的模型在各种掩码方案下迁移到未见过数据的能力——并展示了本章引入的摊销模型的实证结果。
+
+- **第3章（设计）：** 将测量原则应用于基准设计，探讨如何构建有效且可靠的AI评估。
+
+- **第4章（可靠性）：** 建立测量精度的理论，包括经典信度和基于IRT的信度、标准误以及信息函数。
+
+本章的测量概念在全书反复出现。当我们证明使用总分是合理的时候，我们诉诸的是Rasch意义上的充分性。当我们分析基准的维度时，我们应用本章介绍并使用第2章方法训练的因子模型。基准是否测量了它们声称要测量的东西——即效度——这一问题将在@sec-validity 中展开。
+
+
+## 习题 {#sec-irt-exercises}
+
+### 理论习题
+
+**习题1.1** (*)：用自己的话解释为什么总分在Rasch模型中是充分统计量，但在2PL模型中却不是。当我们在2PL下将作答数据压缩为总分时，丢失了什么信息？
+
+**习题1.2** (**)：证明Bradley-Terry模型等价于一个Rasch模型，其中每个“人”代表两个项目之间的一次比较。
+
+*提示：* 将“人”视为有序对$(i, j)$代表一次比较，而“项目”为参与比较的单个实体$k$。定义适当的能力参数和难度参数。
+
+**习题1.3** (**)：证明在Rasch模型中，个体$i$和$k$在项目$j$上正确作答的优势比为：
+
+$$
+\frac{P(Y_{ij} = 1) / P(Y_{ij} = 0)}{P(Y_{kj} = 1) / P(Y_{kj} = 0)} = \exp(\theta_i - \theta_k)
+$$
+
+与项目难度$\beta_j$无关。解释为什么这一性质被称为“特定客观性”。
+
+**习题1.4** (***)：Ising模型和Rasch模型对作答为何相关做出了不同的假设。
+
+(a) 写出二元数据$Y \in \{0, 1\}^{N \times M}$的两个模型。
+
+(b) 描述每个模型假定的因果结构。
+
+(c) 在什么条件下，每个模型可能适用于AI评估？
+
+(d) 提出一种能够区分它们的实证检验。
+
+### 计算习题
+
+**习题1.5** (**)：使用条件最大似然实现Rasch模型估计。
+
+```python
+# Given: Response matrix Y (N models x M questions)
+# Task: Estimate item difficulties using conditional MLE
+#
+# Steps:
+# 1. Compute sum scores for each model
+# 2. For each item, compute the conditional likelihood given sum scores
+# 3. Optimize to find item difficulties
+# 4. Compare estimated difficulties to empirical item means (proportion correct)
+#
+# Use scipy.optimize.minimize for optimization
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.special import logsumexp
+
+def estimate_rasch_conditional(Y):
+    """
+    Estimate Rasch model item difficulties using conditional MLE.
+
+    Parameters:
+    -----------
+    Y : np.ndarray, shape (N, M)
+        Binary response matrix
+
+    Returns:
+    --------
+    beta : np.ndarray, shape (M,)
+        Estimated item difficulties (identified by setting sum(beta) = 0)
+    """
+    N, M = Y.shape
+    # YOUR CODE HERE
+    pass
+
+# Test on simulated data
+np.random.seed(42)
+N, M = 100, 50
+theta_true = np.random.normal(0, 1, N)
+beta_true = np.random.normal(0, 1, M)
+prob = 1 / (1 + np.exp(-(theta_true[:, None] - beta_true[None, :])))
+Y = (np.random.random((N, M)) < prob).astype(int)
+
+beta_hat = estimate_rasch_conditional(Y)
+# Compare to true values (after centering)
+```
+
+**练习 1.6** (**): 给定成对偏好数据，估计 Bradley-Terry 参数。
+
+```python
+# Given: Comparison data as list of (winner, loser) pairs
+# Task: Estimate strength parameters via maximum likelihood
+#
+# The likelihood for comparison (i beats j) is:
+# P(i > j) = exp(theta_i) / (exp(theta_i) + exp(theta_j))
+#           = sigmoid(theta_i - theta_j)
+
+import numpy as np
+from scipy.optimize import minimize
+
+def estimate_bradley_terry(comparisons, n_items):
+    """
+    Estimate Bradley-Terry model parameters.
+
+    Parameters:
+    -----------
+    comparisons : list of (int, int)
+        List of (winner, loser) pairs
+    n_items : int
+        Number of items
+
+    Returns:
+    --------
+    theta : np.ndarray, shape (n_items,)
+        Estimated strength parameters (identified by setting theta[0] = 0)
+    """
+    # YOUR CODE HERE
+    pass
+
+# Test: Simulate comparisons and recover parameters
+```
+
+**Exercise 1.7** (***): 使用安德森似然比检验检验基准数据是否符合Rasch模型。
+
+```python
+# Andersen's LR test:
+# 1. Split persons into groups based on sum score (e.g., high vs low scorers)
+# 2. Estimate item difficulties separately for each group
+# 3. If Rasch holds, these estimates should be equal
+# 4. Test statistic: 2 * (sum of group log-likelihoods - pooled log-likelihood)
+# 5. Under H0, this is chi-squared with df = (n_groups - 1) * (n_items - 1)
+
+def andersen_lr_test(Y, n_groups=2):
+    """
+    Perform Andersen's LR test for Rasch model fit.
+
+    Parameters:
+    -----------
+    Y : np.ndarray, shape (N, M)
+        Binary response matrix
+    n_groups : int
+        Number of groups to split persons into
+
+    Returns:
+    --------
+    statistic : float
+        LR test statistic
+    p_value : float
+        p-value from chi-squared distribution
+    """
+    # YOUR CODE HERE
+    pass
+```
+
+### 讨论问题
+
+**讨论 1.1:** 拉施模型的充分性属性为使用总分数作为测量值提供了理论依据。但多数 AI 基准测试使用了具有不同区分度的项目，这违反了拉施模型的假设。这是否意味着当前基准测试的排名存在根本性缺陷，还是它们仍可作为有用的近似？在何种条件下，采用基于拉施的测量方法会改变前沿模型的排名？
+
+**讨论 1.2:** 拉施学派认为，不符合拉施模型的项目应当被舍弃，因为它们并未测量同一构念。这一观点对 AI 基准测试的设计有何启示？我们应设计符合拉施模型的基准测试，还是应当使用能容纳异质项目的更灵活的模型？
+
+**讨论 1.3:** 网络心理测量学认为症状之间存在因果联系，而非由一个潜在因子导致。AI 能力是否更接近“网络式”而非“因子式”？哪些证据可以区分这两种观点？这会如何改变我们解读基准测试分数的方式？
+
+**讨论 1.4:** @truong2025irsl 的研究表明，IRT 能力 $\theta$ 在预训练过程中随 $\log(\text{FLOP})$ 线性增长，且这一关系使得能力估计值可以在不同基准测试间迁移。这对潜在构念 $\theta$ 的本质意味着什么？它是模型的一种稳定属性，还是 IRT 参数化方式的产物？在何种条件下，$\theta$ 的跨基准迁移会失效？
+
+
+## 文献注释 {#sec-irt-bib}
+
+### 项目反应理论
+
+IRT 的标准参考文献是 Lord 和 Novick 的 *Statistical Theories of Mental Test Scores* (1968)，不过它问世早于现代计算方法。更易读的入门书籍包括 Hambleton 和 Swaminathan 的 *Item Response Theory* (1985) 以及 de Ayala 的 *The Theory and Practice of Item Response Theory* (2009)。*Handbook of Modern Item Response Theory* (van der Linden & Hambleton, 1997) 提供了全面的覆盖。
+
+### 拉施测量
+
+拉施的原创著作 *Probabilistic Models for Some Intelligence and Attainment Tests* (1960) 至今仍有影响。Wright 和 Stone 的 *Best Test Design* (1979) 提供了实践指导。Fischer 和 Molenaar 的 *Rasch Models: Foundations, Recent Developments, and Applications* (1995) 涵盖了扩展与应用。关于哲学基础，可参见收录于 *Rasch Measurement Transactions* 档案中的拉施关于客观性的论文集。
+
+### 历史发展
+
+Thurstone 的开创性论文“A Law of Comparative Judgment” (1927) 开启了偏好的量化研究。Bradley 和 Terry 的“Rank Analysis of Incomplete Block Designs” (1952) 以及 Luce 的 *Individual Choice Behavior* (1959) 奠定了公理化基础。McFadden 的“Conditional Logit Analysis” (1974) 将这些理论与经济理论联系起来。关于心理测量学的历史，可参阅 Boring 的 *A History of Experimental Psychology* (1950)。
+
+### 概率图模型
+
+本章使用了概率图模型（PGM）的板块图和相关概念。@koller2009pgm 提供了一份全面参考，涵盖了有向和无向图模型、板块表示法以及推理算法。希望更深入了解 IRT 和网络模型背后的图模型基础的读者，特别推荐阅读第 3--4 章（贝叶斯网络）和第 5 章（无向模型/马尔可夫随机场）。
+
+### 网络心理测量学
+
+网络方法在 Borsboom 和 Cramer 的《网络分析：一种整合方法》（2013）中提出，并在 Epskamp 等人关于高斯图模型和伊辛模型（2018）的论文中得到形式化。《Network Psychometrics with R》一书（Epskamp 等，2022）提供了实践指导。
+
+### AI 评估
+
+将心理测量方法应用于人工智能是近几年才兴起的。关于将 IRT 应用于大语言模型（LLM），可参考 Polo 等人的“高效多提示评估”（2024）。关于因子模型，请见本教材中提出的方法。Chatbot Arena 在 Zheng 等人的“Judging LLM-as-a-Judge”（2023）中有所描述。
+
+### 尺度定律与 IRT
+
+@truong2025irsl 提出了项目反应尺度定律（IRSL），将 IRT 嵌入到尺度定律的框架中。通过将模型能力与问题难度解耦，IRSL 将尺度定律的估计参数从 $O(M \times N)$ 降低到 $O(M + N)$，并且估计出的能力可以跨基准迁移。他们的 Beta-IRT 公式对经验概率响应（token 概率、通过率）而不是二元正确性进行建模，使用 Beta 损失函数，仅需 2 个测试者即可实现可靠校准。@schaeffer2025monkeys 提供了分布理论，解释了为什么每个问题的指数式尺度会汇聚成幂律尺度：指数由成功概率分布的左尾形状参数决定，从而将题目难度的异质性与总体尺度行为联系起来。

@@ -1,0 +1,1202 @@
+﻿---
+format:
+  html:
+    include-after-body:
+      text: |
+        <script>
+        // Auto-execute all pyodide cells after initialization
+        document.addEventListener('DOMContentLoaded', function() {
+          function waitForPyodide() {
+            if (typeof globalThis.mainPyodide !== 'undefined' && globalThis.mainPyodide) {
+              if (typeof globalThis.qpyodideCellDetails !== 'undefined') {
+                globalThis.qpyodideCellDetails.forEach((cell, index) => {
+                  if (cell.options && cell.options.autorun === 'true') {
+                    setTimeout(() => {
+                      const runButton = document.querySelector(`#qpyodide-button-run-${cell.id}`);
+                      if (runButton && !runButton.disabled) {
+                        runButton.click();
+                      }
+                    }, index * 1000);
+                  }
+                });
+              }
+            } else {
+              setTimeout(waitForPyodide, 500);
+            }
+          }
+          setTimeout(waitForPyodide, 2000);
+        });
+        </script>
+filters:
+  - pyodide
+pyodide:
+  packages:
+    - numpy
+    - matplotlib
+    - scipy
+---
+
+# 效度 {#sec-validity}
+
+::: {.callout-note title="预期学习成果"}
+通过本章学习，你将能够：
+
+1. 在 AI 评估的背景下**定义**效度，并解释为什么它不能简化为一个单一的统计量。
+2. **区分** AI 基准测试的内容效度、效标效度、构念效度、外部效度和后果效度。
+3. **应用** Borsboom 的实在论框架和 Salaudeen 等人的声明中心框架，以评估一个基准是否测量了它所声称要测量的东西。
+4. **识别** AI 评估中常见的效度威胁：基准污染、与构念无关的变异、构念涵盖不足和项目功能差异。
+5. **使用**诊断工具（DIF 分析、维度评估、项目拟合统计量）来检测效度威胁。
+6. **设计**工具构建和修订程序，包括使用合成数据进行项目生成。
+7. **评估**现有 AI 基准测试的效度，使用本章介绍的框架。
+:::
+
+::: {.callout-tip title="建议授课计划" collapse="true"}
+本章可在**3讲**内完成（每讲 75-90 分钟）：
+
+**第 1 讲：效度框架与证据**
+
+- Borsboom 的实在论框架：作为真值的效度、保证推理、语义不确定性（20 分钟）
+- 从信度到效度：激发区分（10 分钟）
+- 效度证据分类：内容、效标、构念、外部、后果（25 分钟）
+- AI 评估中的效度威胁（20 分钟）
+
+**第 2 讲：诊断工具**
+
+- 项目功能差异 (DIF) 分析（25 分钟）
+- 维度评估与平行分析（25 分钟）
+- 项目拟合统计量与污染检测（20 分钟）
+- 动手实践：在模拟数据上运行诊断（5 分钟）
+
+**第 3 讲：构建有效基准**
+
+- 多特质-多方法矩阵（25 分钟）
+- 原则性项目构建与修订（20 分钟）
+- 法则网络与声明中心框架（15 分钟）
+- 设计练习：规划一个有效的评估（15 分钟）
+:::
+
+::: {.callout-note title="符号"}
+本章介绍效度特定符号：$g$（DIF 中的组别成员），$\alpha_{MH}$（Mantel-Haenszel 比值比），$\lambda_k$（维度特征值），$\text{MNSQ}_i$（项目拟合统计量），以及 $r_{ij}$（MTMM 相关系数）。完整的符号参考请见[符号附录](notation.qmd)。
+:::
+
+
+## Borsboom 的保证推理框架 {#sec-borsboom}
+
+在我们能够评估一项评价是否有效之前，我们必须理解效度*意味着*什么。这个看似哲学的问题具有深远的实际意义。如果我们对效度没有清晰的概念，我们就无法评估我们的基准是否真正测量了我们想要测量的东西。
+
+荷兰心理测量学家Denny Borsboom构建了理解测量效度最具影响力的当代框架。他的方法——我们称之为*实在论框架*——为AI评估的AIMS方法提供了哲学基础。
+
+### 效度作为真理，而非证据 {#sec-validity-truth}
+
+传统的效度观，遵循Cronbach和Messick，将效度视为*证据积累*的问题。在这种观点下，一个测验的效度取决于我们收集了支持其预期解释的证据的程度。效度变成了一个程度问题：更多证据意味着更高的效度。
+
+Borsboom拒绝这种观点。他主张效度根本上是关于*真理*，而非证据：
+
+::: {.callout-note title="Borsboom的效度定义"}
+一个测验在测量一个属性时是**有效的**，当且仅当：
+
+1. 该属性**存在**，且
+2. 属性的变化**因果地导致**测量结果的变化。
+
+这是一个是/否的性质：要么该属性导致了测验反应，要么没有。证据与我们对效度的*知识*相关，但效度本身关乎世界的因果结构。
+:::
+
+这一定义有几个重要含义：
+
+**存在性要求。** 所要测量的属性必须真实存在。如果我们声称测量“一般智力”，但并没有这样的东西——如果智力更好地被理解为一组独立的能力——那么没有任何测验能有效测量它。存在问题是一个经验问题，而非定义问题。
+
+**因果性要求。** 属性必须*导致*测验反应的变化。仅仅测验分数与属性*相关*是不够的；属性必须是变化的原因。这排除了那些仅仅预测结果而没有测量潜在构念的测验。
+
+**真理与证据的区别。** 我们可以有强有力的证据表明一个测验是有效的，但结果却可能错误。相反，一个测验即使我们证据有限也可能是有效的。这一区别很重要，因为它将认识论问题（我们知道什么？）与本体论问题（什么是真实的？）区分开来。
+
+### 保证推断问题 {#sec-warrant-inference}
+
+测量涉及从观察到的数据到潜在构念的推断：
+
+$$
+\text{Observed: } Y_{ij} \quad \xrightarrow{\text{inference}} \quad \text{Latent: } \theta_i
+$$
+
+这种推断需要一个**保证**：一个合理的信念，即测验测量了它所声称测量的东西。保证将测量过程（施测题目、记录反应）与理论构念（能力、智力、推理）联系起来。
+
+按照Toulmin的论证模型，一个测量论证具有以下结构：
+
+- **主张：** "模型 $i$ 的能力 $\theta_i = 2.3$"
+- **数据：** "模型 $i$ 答对了 60 个问题中的 47 个"
+- **保证：** "该测试测量了能力构念，并且评分程序准确地将反应转化为能力估计"
+- **支持：** "测试题目由领域专家编写，心理测量模型与数据拟合，能力估计在不同题目子集上保持稳定"
+
+保证是关键要素。没有它，我们就缺少将测试分数解释为对预期构念的测量的依据。支持为保证提供证据，但不能替代保证。
+
+### Semantic Indeterminacy {#sec-semantic-indeterminacy}
+
+Borsboom 指出了测量中的一个根本问题：**语义不确定性**。测试分数的含义取决于我们采用哪种测量体系，但对于任何特定体系都缺乏令人信服的论证。
+
+考虑三种测量框架：
+
+1. **经典测验理论 (CTT)：** 测试分数 $X = T + E$ 由真分数 $T$ 加上随机误差 $E$ 组成。真分数定义为在假设的重复测验中测试分数的期望值。
+
+2. **项目反应理论 (IRT)：** 测试反应由一个潜在能力 $\theta$ 通过概率模型 $P(Y_{ij} = 1 | \theta_i, \beta_j)$ 生成。能力参数是独立于任何特定测试而存在的个体属性。
+
+3. **网络模型：** 不存在潜在变量。测试题目之间因果相连，相关性来源于这些直接连接，而非共同原因。
+
+这些框架对测试分数的含义做出了不同的主张：
+
+| 框架 | 分数代表什么？ |
+|-----------|-------------------------------|
+| CTT | 测试重复的期望值 |
+| IRT | 潜在连续体上的位置 |
+| 网络 | 网络状态的总结 |
+
+这些框架不仅仅是同一模型的不同参数化方式——它们对所存在的事物以及因果联系做出了不同的本体论承诺。然而，我们通常无法凭经验区分它们。
+
+::: {.callout-note title="对 AI 评估的启示"}
+当我们说"GPT-4 的推理能力为 2.3 logits"时，我们指的是什么？答案取决于我们的测量框架：
+
+- **CTT 解释：** 如果我们多次对 GPT-4 进行平行测验，它的平均分数将对应于 2.3 logits。
+- **IRT 解释：** GPT-4 具备一种潜在的推理能力，当与题目难度结合时，就产生了观测到的反应模式。
+- **网络解释：** GPT-4 对推理问题的回答形成了一个模式，我们以数字 2.3 概括该模式，但实际上并没有被测量的单一"推理能力"。
+
+这些解释对我们如何使用和信任这一测量有着不同的启示。
+:::
+
+### Construct Validity and the Nomological Network {#sec-nomological-network}
+
+如果一个构念无法被直接观察，我们如何知道它的存在？Cronbach和Meehl提出，构念是由其在**法则网络**（nomological network）中的位置来定义的——这是一个将该构念与其他构念和可观察指标连接起来的理论关系网。
+
+例如，“推理能力”可能由以下关系定义：
+
+- 更高的推理能力 $\to$ 更佳的逻辑谜题表现
+- 更高的推理能力 $\to$ 更佳的数学证明表现
+- 更高的推理能力 $\to$ 与一般智力的相关
+- 更高的推理能力 $\to$ 随教育而发展
+
+构念通过这些关系获得意义。如果一个测验分数的表现如理论所预测——如果它与正确的事物相关而不与错误的事物相关——我们就有了证据表明它测量了预期的构念。
+
+对于AI评估，这表明我们需要理论框架来明确：
+
+1. 哪些能力应与基准性能相关
+2. 哪些能力应独立于基准性能
+3. 能力应如何随模型规模或训练而发展
+4. 能力应如何跨领域迁移
+
+没有这样的框架，我们得到的基准分数就毫无意义。
+
+
+## 从信度到效度 {#sec-reliability-to-validity}
+
+设想一个编程基准能产生高度一致的分数：每次评估模型时，其准确率都大致相同。分半信度为0.95，Cronbach's alpha为0.93，且来自@sec-reliability 的G系数非常出色。你可能会认为这个基准运行良好。
+
+但假设你进一步调查后发现，这些基准题目是从一个流行的编程教程网站上抓取的。得分最高的模型恰好是那些训练数据中包含该网站的模型。这个基准不是在测量*编程能力*——而是在测量*对特定解法的记忆*。这些分数完全一致，但它们的含义并非你所想的那样。
+
+这就是效度问题。信度问的是：*评估是否会给出两次相同的答案？* 效度则提出了更深层的问题：*评估是否测量了它声称要测量的东西？* 一个完全可信的工具可能完全无效——就像一个无论谁站上去都显示70公斤的浴室秤。相反，效度*要求*信度：如果测量值随机波动，它们就无法追踪任何潜在属性。
+
+在@sec-borsboom 中，我们介绍了Borsboom的实在论效度定义：一个测验对于测量某个属性是有效的，当且仅当 (a) 该属性存在，且 (b) 属性的变化*因果地导致*测验分数的变化 [@borsboom2005measuring]。这是一个严格的标准。它要求的不仅是分数与目标构念之间的统计关联，而是连接二者的因果机制。
+
+最近，@salaudeen2025measurement 提出了一个*以声明为中心的* AI 评估效度框架。他们的核心见解是：基准测试本身并非抽象地有效或无效——它们是*针对特定声明*才具有效度的。某个基准可能有效地支持“模型 A 在这 500 道选择题上得分高于模型 B”这一声明，却不能支持“模型 A 的推理能力强于模型 B”这一更宽泛的声明。效度关乎测量工具、预期的解释与被评估的系统总体之间的关系。
+
+::: {.callout-important title="效度并非仅由测试本身决定的属性"}
+一个基准测试不能孤立地判定为“有效”或“无效”。效度取决于：
+
+- **概念构念**：我们声称要测量什么属性？
+- **总体**：哪些模型或系统正在接受评估？
+- **解释**：从分数中得出了什么结论？
+- **情境**：分数将在何种情境中使用？
+
+同一个基准测试对某个目的可能是有效的，对另一个目的则可能无效。效度是*推论*的属性，而非工具本身的属性。
+:::
+
+本章将阐述在 AI 评估中评估与构建效度的理论和工具。我们首先给出效度证据的分类法（@sec-validity-taxonomy），然后审视 AI 基准测试中效度面临的主要威胁（@sec-validity-threats）。接着，我们将开发用于检测这些威胁的诊断工具（@sec-validity-diagnostics），最后介绍构建有效评估工具的方法（@sec-building-valid）。
+
+
+## 效度证据的分类法 {#sec-validity-taxonomy}
+
+效度的现代观点，遵循 @messick1995validity 以及《教育与心理测试标准》，将效度视为一个*统一的概念*：即证据支持对测试分数的预期解释的程度。然而，效度证据存在几种可区分的类型。借鉴 @salaudeen2025measurement 和经典框架，我们将效度证据归为五类。
+
+### 内容效度 {#sec-content-validity}
+
+内容效度关注基准测试是否充分*代表了*其所声称要测量的概念构念领域。关键问题在于：基准是否覆盖了该构念的全部范围？题目是否相关？构念的重要方面是否有所遗漏？
+
+在 AI 评估中，内容效度的缺失普遍存在。一个冠以“推理”之名的基准可能只包含算术应用题，而完全缺失逻辑推理、因果推理、类比推理和空间推理。一个“编程能力”基准可能只测试 Python 函数补全，而忽略了调试、系统设计、文档编写和代码审查。
+
+内容效度通过 *专家判断* 而非统计分析来建立。领域专家审查构念定义，检查题目池，并评估覆盖程度。在AI评估中，这一步骤经常被跳过：基准测试是基于现有数据的便利样本构建的，而非根据原则性的领域规范。
+
+**AI示例。** 假设某个基准测试声称要测量“科学推理”。内容效度要求询问：它是否包括假设生成？实验设计？数据解释？统计推断？因果推理？如果它仅测试科学知识的事实回忆，那么对于“推理”这一声称，它的内容效度较差，无论其分数信度有多高。
+
+### 准则效度 {#sec-criterion-validity}
+
+准则效度询问基准测试的分数是否预测或关联于一个独立捕捉该构念的外部准则。有两个子类型：
+
+- **同时效度**：基准测试与 *当前可用* 的金标准相关联。例如，一个自动化编码基准测试应与对相同代码的专家人类评估相关联。
+- **预测效度**：基准测试预测 *未来的结果* 。例如，面向编码助手的基准测试应能预测该助手在实际开发者工作流程中随时间的有用性。
+
+准则效度提供了最有说服力的部分证据，但它要求存在一个值得信赖的外部准则——这通常正是根本问题所在。如果我们已经拥有了完美的“推理能力”测度，我们就不需要这个基准测试了。准则验证的循环性是心理测量学中公认的挑战 [@cronbach1955construct]，并且在AI评估中变得尤为尖锐，因为所关注的构念（例如，“通用智能”）可能没有任何公认的金标准。
+
+**AI示例。** 聊天机器人竞技场 [@zheng2023judging] 收集成对的人类偏好作为模型质量的准则。如果基准测试的分数与竞技场Elo评级相关联，则该基准测试具有同时准则效度。但竞技场本身存在效度假设——众包工作者的偏好是否是“模型质量”的有效准则？
+
+### 构念效度 {#sec-construct-validity}
+
+构念效度是效度证据的核心且最全面的形式。它询问：基准测试是否实际测量了它声称要测量的 *理论构念* ？这超越了内容覆盖和准则相关性，涉及到测量的内部结构。
+
+构念效度的经典方法使用两类证据：
+
+- **聚合效度**：基准上的得分应当与其他测量相同或紧密相关构念的得分呈*正*相关。如果两个不同的“推理”基准产生的得分不相关，那么至少其中一个的构念效度很差。
+- **区分效度**：基准上的得分不应当与*不同*构念的测量强相关。如果一个“推理”基准与一个“记忆”基准的关联程度，和它与另一个推理基准的关联程度一样高，那么这个构念就没有被很好地区分开。
+
+对聚合效度和区分效度的系统研究由 @campbell1959convergent 通过 **多特质-多方法（MTMM）矩阵** 加以形式化，我们将在 @sec-mtmm 中详细阐述。
+
+在 Borsboom 的因果框架下，构念效度需要一个特定的因果主张：潜在属性（推理能力）的变异会因果性地导致基准得分的变异。这是可检验的——如果我们能够进行干预，在保持其他一切不变的情况下提升模型的推理能力，那么有效的基准得分应当会随之提高。实际上，此类干净的干预十分罕见，但因果框架澄清了我们正在提出的问题。
+
+**AI 示例。** 考虑两个都声称测量“数学推理”的基准：GSM8K（小学数学应用题）和 MATH（竞赛水平问题）。如果它们测量的是同一个构念，那么在一个基准上表现出色的模型在另一个上也应表现出色（聚合效度）。如果“数学推理”不同于“常识知识”，那么 GSM8K 得分与常识基准的关联度应当低于其与 MATH 的关联度（区分效度）。
+
+### 外部效度 {#sec-external-validity}
+
+外部效度关注基准结果在评价特定条件之外的可推广性。基准上的表现能否预测其他环境、其他群体或其他时间中的表现？
+
+对于 AI 系统，外部效度问题包括：
+
+- 在英文基准上的表现能否预测多语言表现？
+- 在精心整理的干净测试项目上的结果能否推广到嘈杂的真实世界输入？
+- 今天的基准得分能否预测模型更新后的表现？
+- 结果能否在不同部署环境（例如，从研究环境到生产环境）之间推广？
+
+外部效度与*分布偏移*问题密切相关，我们将在 @sec-causality 中对其进行正式考察。当基准分布与目标分布不同时，良好的基准表现可能无法迁移。
+
+**AI 示例。** 一个模型在从教科书问题衍生的医学问答基准上获得了 95% 的得分。但在临床环境中，问题更加嘈杂，嵌入在上下文中，并可能包含模糊信息。如果这 95% 的得分不能预测临床上有用的表现，那么该基准的外部效度就很差。
+
+### 后果效度 {#sec-consequential-validity}
+
+Consequential validity, introduced by @messick1995validity, asks whether the *social consequences* of using benchmark scores are appropriate. This is the most controversial form of validity evidence, as it extends validity beyond measurement science into ethics and policy.
+
+In AI evaluation, consequential validity is increasingly important:
+
+- **Goodhart's law**: When a benchmark becomes a target, models are optimized for it, and the benchmark ceases to measure the original construct. Training on benchmark-like data improves scores without improving capability.
+- **Development distortion**: Benchmarks that are easy to optimize attract disproportionate effort, even if they measure less important capabilities.
+- **Misuse of rankings**: Leaderboard positions are used to make deployment decisions, marketing claims, and policy arguments that go far beyond what the scores support.
+
+Consequential validity does not mean that benchmarks are "invalid" whenever they have negative consequences. Rather, it means that the consequences of score use are *relevant evidence* when evaluating whether the measurement system is serving its intended purpose.
+
+**AI example.** A safety benchmark becomes widely used for regulatory compliance. Model developers learn to optimize specifically for the benchmark items, achieving high scores while leaving genuine safety risks unaddressed. The consequential validity of the benchmark is undermined: the scores are being used to support claims ("this model is safe") that they do not actually support.
+
+### Summary
+
+@tbl-validity-taxonomy summarizes the five forms of validity evidence, their key questions, and how they manifest in AI evaluation.
+
+| Form | Key Question | AI Example | Typical Evidence |
+|------|-------------|------------|-----------------|
+| Content | Does the benchmark cover the construct domain? | "Reasoning" benchmark tests only arithmetic | Expert review, domain specification |
+| Criterion | Do scores predict an external criterion? | Benchmark vs. Arena Elo correlation | Correlation with gold standard |
+| Construct | Does the benchmark measure the intended construct? | Convergent/discriminant evidence across benchmarks | MTMM matrix, factor analysis |
+| External | Do results generalize beyond test conditions? | English benchmark → multilingual performance | Cross-context replication |
+| Consequential | Are the social consequences appropriate? | Goodhart's law on safety benchmarks | Impact analysis, misuse audit |
+
+: Five forms of validity evidence for AI evaluation {#tbl-validity-taxonomy}
+
+
+## Threats to Validity in AI Evaluation {#sec-validity-threats}
+
+Even well-designed benchmarks face systematic threats that can undermine the validity of the inferences they support. We identify four major categories.
+
+### Construct-Irrelevant Variance {#sec-civ}
+
+当系统性因素 *而非目标构念* 影响基准分数时，就会出现构念无关方差（CIV）。与随机噪声（会降低信度）不同，CIV 是系统性的，可能以可预测的方式抬高或压低分数。
+
+AI 评估中 CIV 的来源包括：
+
+- **提示格式敏感性**：以不同格式（要点列表 vs. 段落，编号选项 vs. 字母选项）呈现的相同问题，可能会大幅改变模型响应 [@mizrahi2024state]。如果构念是“推理”，但分数取决于格式，那么格式就贡献了构念无关方差。
+- **多项选择位置偏差**：许多语言模型对特定答案位置（如选项 A 或最后一个选项）表现出系统偏好。这会在正确答案恰好位于偏好位置时抬高题目分数。
+- **分词伪影**：模型性能可能取决于文本的分词方式，这是模型词表的伪影，而非其能力的体现。
+- **语言与文化偏见**：假定特定文化知识或语言模式的题目，可能对主要基于某些数据训练的模型更简单，而这独立于目标构念。
+
+CIV 尤其隐蔽，因为它具有 *系统性*：与随机误差不同，它不会随着题目增多而平均消除。一个充满位置偏差项目的基准具有高信度（偏差一致），但效度较差（分数反映的是位置偏好，而不仅仅是目标能力）。
+
+### 构念代表性不足 {#sec-construct-underrepresentation}
+
+当基准 *过于狭窄*，只抽取了其声称测量的构念的有限方面时，就会出现构念代表性不足。这是来自 @sec-content-validity 的内容效度威胁，只是从不同的视角来看。
+
+AI 评估中的例子：
+
+- **编码能力** 仅通过函数补全任务进行测试，而缺少调试、架构设计、代码审查、文档编写和重构。
+- **语言理解** 仅用正式、规范的文本测试，而缺少口语、语码转换和领域特定术语。
+- **安全性** 仅通过英文对抗性提示词测试，而缺少多语言攻击、多轮操纵和系统提示词越狱尝试。
+
+构念代表性不足往往是便利抽样的结果：基准是从易于收集和标注的数据构建的，而非基于对构念领域的系统化规范。
+
+### 基准污染 {#sec-contamination}
+
+基准污染发生在评估题目出现在模型的训练数据中时，此时模型检索记忆中的答案，而非展现目标能力。这可以说是当前 AI 评估中讨论最多的效度威胁。
+
+污染可以是*直接*的（训练和测试项完全匹配）或*间接*的（来自相同来源的释义、衍生或共享结构模式的项）。检测方法包括：
+
+- **金丝雀字符串**：在基准项中嵌入唯一标识符，测试模型能否复现它们[@jacovi2023stop]。
+- **成员推断**：通过统计检验判断模型在训练期间是否见过特定项。
+- **时间切分**：对比模型训练数据截止日期之前与之后创建的项的表现。
+- **公开/私有切分**：公开发布的项往往得分虚高，与保留的私有一项相比——该差距衡量了污染效应。
+- **表现不连续**：若模型在“见过”的项上准确率远高于匹配的“未见过”项，则很可能存在污染。
+
+在Borsboom因果框架下，污染对效度构成威胁，因为它引入了一条替代因果路径：模型反应由*记忆*引起，而非目标*能力*。得分不再反映其声称测量的构念。
+
+### 项目功能差异 {#sec-dif-theory}
+
+当控制整体能力水平后，一个项目对某一亚组被试始终比另一亚组更容易或更困难时，就出现了项目功能差异（DIF）。在经典心理测量学中，DIF分析比较人口学群体；在AI评估中，“群体”可以是模型家族、架构类型或训练范式。
+
+形式上，若项目$i$满足以下条件，则呈现DIF：
+
+$$
+P(X_{ij} = 1 \mid \theta_j, g = 1) \neq P(X_{ij} = 1 \mid \theta_j, g = 0)
+$$ {#eq-dif-definition}
+
+其中$\theta_j$是模型$j$的能力，$g$是群体隶属关系。以$\theta_j$为条件是关键：我们询问的是，对于来自不同群体的能力相同的模型，该项目表现是否不同。
+
+DIF有两种形式：
+
+- **均匀DIF**：对于所有能力水平，该项目对一个群体始终更容易（或更困难）。两组的项目特征曲线（ICC）平移但不交叉。
+- **非均匀DIF**：该项目在某些能力水平上有利于一个群体，在其他水平上有利于另一群体。ICC出现交叉。
+
+**Mantel-Haenszel (MH) 方法**[@holland1988differential]是使用最广泛的DIF检测方法。它按能力（以总分作为代理）对被试进行分层，计算每层的比值比，并将其合并为一个汇总统计量：
+
+$$
+\alpha_{MH} = \frac{\sum_k A_k D_k / N_k}{\sum_k B_k C_k / N_k}
+$$ {#eq-mh-statistic}
+
+其中$A_k, B_k, C_k, D_k$是在能力分层$k$处$2 \times 2$表格（正确/错误$\times$群体）的条目，$N_k$是该层样本量。比值比为1表示无DIF；显著偏离1的值则表示存在DIF。
+
+**AI示例。** 考虑一个比较开源和专有模型的数学基准测试。某些题目可能依赖 LaTeX 格式的数学表达式，专有模型由于训练数据构成的原因对此处理得更好，而这与数学推理能力无关。这些题目会表现出 DIF：格式上的优势会虚增某组的得分，而不能反映目标构念。
+
+
+## 有效性诊断工具 {#sec-validity-diagnostics}
+
+本节开发了三种计算工具，用于检测上述有效性威胁。
+
+### DIF 分析 {#sec-dif-analysis}
+
+@sec-dif-theory 中描述的 Mantel-Haenszel 程序提供了一种非参数 DIF 检验。一种补充方法使用 **逻辑回归** [@zumbo1999handbook]：
+
+$$
+\log \frac{P(X_{ij}=1)}{P(X_{ij}=0)} = \beta_0 + \beta_1 \theta_j + \beta_2 g_j + \beta_3 (\theta_j \times g_j)
+$$ {#eq-logistic-dif}
+
+其中 $\theta_j$ 是能力代理变量（总分），$g_j$ 是组别，$\beta_3$ 捕捉交互作用。检验 $\beta_2 = 0$ 可检测均匀 DIF；检验 $\beta_3 = 0$ 可检测非均匀 DIF。
+
+以下模拟演示了在含有植入 DIF 项目的基准测试上进行 DIF 分析。
+
+{{< include _plt_setup.qmd >}}
+
+```{pyodide-python}
+#| label: dif-analysis
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.special import expit
+from scipy.stats import chi2
+
+np.random.seed(42)
+
+# --- Simulation setup ---
+n_models = 200  # 100 per group
+n_items = 30
+n_dif_items = 5  # items with planted DIF
+
+# Model abilities: two groups with same ability distribution
+theta_g0 = np.random.normal(0, 1, 100)  # Group 0 (e.g., open-source)
+theta_g1 = np.random.normal(0, 1, 100)  # Group 1 (e.g., proprietary)
+theta = np.concatenate([theta_g0, theta_g1])
+group = np.array([0]*100 + [1]*100)
+
+# Item difficulties
+beta = np.linspace(-2, 2, n_items)
+
+# Generate responses: Rasch model with DIF on last 5 items
+# DIF items are 0.8 logits easier for Group 1
+dif_shift = np.zeros(n_items)
+dif_shift[-n_dif_items:] = -0.8  # negative = easier for Group 1
+
+X = np.zeros((n_models, n_items))
+for j in range(n_models):
+    for i in range(n_items):
+        shift = dif_shift[i] if group[j] == 1 else 0
+        p = expit(theta[j] - beta[i] + shift)
+        X[j, i] = np.random.binomial(1, p)
+
+# --- Mantel-Haenszel DIF detection ---
+total_scores = X.sum(axis=1)
+# Create 5 ability strata based on total score quintiles
+strata = np.digitize(total_scores, np.percentile(total_scores, [20, 40, 60, 80]))
+
+mh_odds_ratios = []
+mh_chi2 = []
+
+for i in range(n_items):
+    num = 0; den = 0
+    a_tot = 0; b_tot = 0; c_tot = 0; d_tot = 0
+    for k in range(5):
+        mask = (strata == k)
+        g0_mask = mask & (group == 0)
+        g1_mask = mask & (group == 1)
+
+        a = X[g0_mask, i].sum()  # Group 0, correct
+        b = g0_mask.sum() - a     # Group 0, incorrect
+        c = X[g1_mask, i].sum()  # Group 1, correct
+        d = g1_mask.sum() - c     # Group 1, incorrect
+
+        Nk = g0_mask.sum() + g1_mask.sum()
+        if Nk > 0:
+            num += (a * d) / Nk
+            den += (b * c) / Nk
+        a_tot += a; b_tot += b; c_tot += c; d_tot += d
+
+    alpha_mh = num / den if den > 0 else np.inf
+    mh_odds_ratios.append(alpha_mh)
+
+    # MH chi-square (simplified)
+    log_or = np.log(alpha_mh) if alpha_mh > 0 and alpha_mh < np.inf else 0
+    mh_chi2.append(log_or)
+
+mh_log_or = np.array([np.log(x) if 0 < x < np.inf else 0 for x in mh_odds_ratios])
+
+# --- Visualization ---
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+# Panel 1: MH log-odds ratios
+colors = ['#E8637A' if i >= n_items - n_dif_items else '#5B8DEE' for i in range(n_items)]
+axes[0].bar(range(n_items), mh_log_or, color=colors, alpha=0.8, edgecolor='white')
+axes[0].axhline(y=0, color='black', linewidth=0.8)
+axes[0].axhline(y=np.log(1.5), color='gray', linewidth=0.8, linestyle='--', label='|log OR| = 0.41 threshold')
+axes[0].axhline(y=-np.log(1.5), color='gray', linewidth=0.8, linestyle='--')
+axes[0].set_xlabel('Item Index')
+axes[0].set_ylabel('MH Log-Odds Ratio')
+axes[0].set_title('DIF Detection: Mantel-Haenszel')
+from matplotlib.patches import Patch
+axes[0].legend(handles=[
+    Patch(facecolor='#5B8DEE', label='Non-DIF items'),
+    Patch(facecolor='#E8637A', label='DIF items (planted)'),
+    plt.Line2D([0], [0], color='gray', linestyle='--', label='Detection threshold')
+])
+
+# Panel 2: ICC curves for a DIF item vs non-DIF item
+theta_range = np.linspace(-3, 3, 100)
+
+# Non-DIF item (item 10)
+p_g0_nondif = expit(theta_range - beta[10])
+p_g1_nondif = expit(theta_range - beta[10])
+
+# DIF item (item 28)
+p_g0_dif = expit(theta_range - beta[28])
+p_g1_dif = expit(theta_range - beta[28] + dif_shift[28])
+
+axes[1].plot(theta_range, p_g0_nondif, '#5B8DEE', linewidth=2, label='Non-DIF: Group 0')
+axes[1].plot(theta_range, p_g1_nondif, '#5B8DEE', linewidth=2, linestyle='--', label='Non-DIF: Group 1')
+axes[1].plot(theta_range, p_g0_dif, '#E8637A', linewidth=2, label='DIF: Group 0')
+axes[1].plot(theta_range, p_g1_dif, '#E8637A', linewidth=2, linestyle='--', label='DIF: Group 1')
+axes[1].set_xlabel(r'Ability ($\theta$)')
+axes[1].set_ylabel('P(Correct)')
+axes[1].set_title('ICC Comparison: DIF vs Non-DIF Item')
+axes[1].legend()
+axes[1].set_ylim(-0.05, 1.05)
+
+plt.tight_layout()
+plt.show()
+
+# Summary
+n_flagged = sum(1 for x in mh_log_or if abs(x) > np.log(1.5))
+print(f"\nDIF Analysis Summary:")
+print(f"  Items flagged (|log OR| > 0.41): {n_flagged} / {n_items}")
+print(f"  True DIF items: {n_dif_items}")
+dif_detected = sum(1 for i in range(n_items - n_dif_items, n_items) if abs(mh_log_or[i]) > np.log(1.5))
+print(f"  Correctly detected: {dif_detected} / {n_dif_items}")
+```
+
+左图展示了每个项目的Mantel-Haenszel对数优势比。接近零的项目表示不存在DIF；绝对值大的项目会被标记。植入的DIF项目（红色）聚集在极端值处，而非DIF项目（蓝色）则保持在零附近。右图比较了项目特征曲线：对于非DIF项目，两组共享相同的ICC；对于DIF项目，组1的曲线向左移动（在任何能力水平下，该项目对他们来说都更容易），这表明存在一致性DIF。
+
+在实践中，AI基准的DIF分析会比较模型家族（例如，自回归模型与编码器-解码器模型）、训练范式（例如，RLHF与基础模型）或架构特征（例如，混合专家模型与密集Transformer）。
+
+
+### 维度评估 {#sec-dimensionality}
+
+声称测量单一构念（例如，“推理”）的基准测试应该表现出单维因子结构：一个潜因子应该能够解释项目间的大部分协变。如果需要多个因子，那么该基准实际上是在测量多个构念，而单一的汇总分数就会将这些构念混淆。
+
+维度评估的主要工具是项目相关矩阵的**特征值分析**。在单维基准中，第一个特征值应该显著大于其余特征值。然而，原始特征值可能会产生误导，因为即使是随机数据也会产生一个并非微不足道的第一个特征值。
+
+**平行分析（Parallel analysis）** [@horn1965rationale] 通过将观测到的特征值与来自相同维度的随机数据生成的特征值进行比较来解决这个问题。只有当因子的特征值超过相应的随机数据特征值时，该因子才会被保留。这与@sec-foundations 中讨论的因子模型相关：如果数据需要$k$个因子，那么该基准测量的是$k$个不同的构念，而不是一个。
+
+```{pyodide-python}
+#| label: dimensionality-analysis
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(123)
+
+# --- Simulate a 2-factor benchmark ---
+n_models = 300
+n_items = 20
+n_factor1 = 10  # "verbal reasoning" items
+n_factor2 = 10  # "quantitative reasoning" items
+
+# Two latent factors with moderate correlation
+factor_corr = 0.3
+cov_matrix = np.array([[1.0, factor_corr], [factor_corr, 1.0]])
+L = np.linalg.cholesky(cov_matrix)
+factors = np.random.normal(0, 1, (n_models, 2)) @ L.T
+
+# Factor loadings
+loadings = np.zeros((n_items, 2))
+loadings[:n_factor1, 0] = np.random.uniform(0.5, 0.9, n_factor1)  # Factor 1
+loadings[n_factor1:, 1] = np.random.uniform(0.5, 0.9, n_factor2)  # Factor 2
+
+# Generate continuous item scores (for eigenvalue analysis)
+noise_var = 0.4
+X = factors @ loadings.T + np.random.normal(0, np.sqrt(noise_var), (n_models, n_items))
+
+# --- Eigenvalue analysis ---
+corr_matrix = np.corrcoef(X.T)
+eigenvalues = np.linalg.eigvalsh(corr_matrix)[::-1]  # Descending
+
+# --- Parallel analysis (100 replications) ---
+n_reps = 100
+random_eigenvalues = np.zeros((n_reps, n_items))
+for rep in range(n_reps):
+    X_random = np.random.normal(0, 1, (n_models, n_items))
+    corr_random = np.corrcoef(X_random.T)
+    random_eigenvalues[rep] = np.linalg.eigvalsh(corr_random)[::-1]
+
+pa_threshold = np.percentile(random_eigenvalues, 95, axis=0)
+
+# --- Visualization ---
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+# Panel 1: Scree plot with parallel analysis
+components = np.arange(1, n_items + 1)
+axes[0].plot(components[:10], eigenvalues[:10], 'o-', color='#5B8DEE', linewidth=2,
+             markersize=8, label='Observed eigenvalues', zorder=3)
+axes[0].plot(components[:10], pa_threshold[:10], 's--', color='#E8637A', linewidth=2,
+             markersize=6, label='95th percentile (random)', zorder=3)
+axes[0].axhline(y=1, color='gray', linewidth=0.8, linestyle=':', label='Kaiser criterion')
+# Shade retained factors
+n_retained = sum(eigenvalues > pa_threshold)
+for k in range(min(n_retained, 10)):
+    axes[0].axvspan(k + 0.6, k + 1.4, alpha=0.1, color='#45BF7C')
+axes[0].set_xlabel('Component')
+axes[0].set_ylabel('Eigenvalue')
+axes[0].set_title('Scree Plot with Parallel Analysis')
+axes[0].legend()
+axes[0].set_xticks(components[:10])
+
+# Panel 2: Loading structure
+# Estimate loadings via PCA (first 2 components)
+X_centered = X - X.mean(axis=0)
+U, S, Vt = np.linalg.svd(X_centered, full_matrices=False)
+pc_loadings = Vt[:2, :].T * S[:2] / np.sqrt(n_models - 1)
+
+colors = ['#5B8DEE'] * n_factor1 + ['#E8637A'] * n_factor2
+axes[1].scatter(pc_loadings[:, 0], pc_loadings[:, 1], c=colors, s=80,
+                edgecolors='white', linewidth=0.5, zorder=3)
+for i in range(n_items):
+    axes[1].annotate(f'{i+1}', (pc_loadings[i, 0] + 0.02, pc_loadings[i, 1] + 0.02),
+                     fontsize=7, color='gray')
+axes[1].axhline(y=0, color='gray', linewidth=0.5)
+axes[1].axvline(x=0, color='gray', linewidth=0.5)
+axes[1].set_xlabel('PC1 Loading (Factor 1: Verbal)')
+axes[1].set_ylabel('PC2 Loading (Factor 2: Quantitative)')
+axes[1].set_title('Item Loading Structure')
+from matplotlib.patches import Patch
+axes[1].legend(handles=[
+    Patch(facecolor='#5B8DEE', label='Verbal items (1-10)'),
+    Patch(facecolor='#E8637A', label='Quantitative items (11-20)')
+])
+
+plt.tight_layout()
+plt.show()
+
+print(f"\nDimensionality Assessment:")
+print(f"  First 5 eigenvalues: {', '.join(f'{e:.2f}' for e in eigenvalues[:5])}")
+print(f"  Parallel analysis threshold: {', '.join(f'{e:.2f}' for e in pa_threshold[:5])}")
+print(f"  Factors retained (parallel analysis): {n_retained}")
+print(f"  Variance explained by 2 factors: {eigenvalues[:2].sum() / eigenvalues.sum():.1%}")
+```
+
+碎石图（左）显示有两个特征值明显高于平行分析阈值（红色虚线），证实了二维结构。载荷图（右）揭示了双因子结构：言语项目（蓝色，1--10）负荷于第一个成分，而数量项目（红色，11--20）负荷于第二个成分。若基准测试报告的是单一“推理”分数，便会混淆这两种不同的能力。
+
+这一分析与在 @sec-foundations 中引入的因子模型直接相关。当维度评估揭示出多个因子时，恰当的应对方式是：（a）报告每个因子的子分数，而非单一综合分，或（b）修订基准测试，使其聚焦于单一构念。
+
+
+### 项目拟合与污染检测 {#sec-item-fit}
+
+源自 Rasch 建模的项目拟合统计量 [@wright1982solving] 衡量的是单个项目与测量模型的吻合程度。拟合不良的项目——即作答模式偏离模型预测的项目——可能表明存在污染、与构念无关的特征或其他效度问题。
+
+两种标准的拟合统计量为：
+
+- **Infit**（信息加权均方）：对项目难度水平附近的非预期作答敏感。Infit 强调目标一致的作答，较少受极端分数的影响。
+- **Outfit**（未加权均方）：对远离项目难度水平的非预期作答敏感。较大的 Outfit 值表明，对于能力极高或极低的模型，该项目的行为表现不稳定。
+
+对于具有预测概率 $P_{ij} = \text{expit}(\theta_j - \beta_i)$ 的 Rasch 模型，标准化残差为：
+
+$$
+z_{ij} = \frac{X_{ij} - P_{ij}}{\sqrt{P_{ij}(1 - P_{ij})}}
+$$
+
+项目 $i$ 的 Outfit 均方为：
+
+$$
+\text{Outfit}_i = \frac{1}{N} \sum_{j=1}^{N} z_{ij}^2
+$$
+
+而 Infit 则依方差加权：
+
+$$
+\text{Infit}_i = \frac{\sum_{j=1}^{N} (X_{ij} - P_{ij})^2}{\sum_{j=1}^{N} P_{ij}(1 - P_{ij})}
+$$
+
+模型下的期望值为 1.0。高于 1.3 表示欠拟合（噪声大于模型预测，可能由多维性或随机误差导致）。低于 0.7 表示过拟合（过于可预测，可能源于项目冗余或依赖）。极高值（高于 2.0）则表明存在严重拟合不良。
+
+污染会留下独特的项目拟合特征：对于已记忆该项目的模型，受污染项目变得容易得多（能力低的模型会产生非预期的正确作答），而对于未受污染的模型，其真实难度保持不变。这会导致 Outfit 统计量膨胀，因为拟合不良的作答来自与项目难度相距甚远的模型。
+
+```{pyodide-python}
+#| label: item-fit-contamination
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.special import expit
+
+np.random.seed(321)
+
+# --- Simulation: Rasch benchmark with contaminated items ---
+n_models = 150
+n_items = 25
+n_contaminated = 5  # Items that some models have memorized
+
+theta = np.random.normal(0, 1, n_models)
+beta = np.linspace(-2, 2, n_items)
+
+# Mark 30 models as "contaminated" (saw some test items during training)
+contaminated_models = np.random.choice(n_models, 30, replace=False)
+contaminated_items = list(range(n_items - n_contaminated, n_items))
+
+# Generate responses
+X = np.zeros((n_models, n_items))
+for j in range(n_models):
+    for i in range(n_items):
+        p = expit(theta[j] - beta[i])
+        # Contaminated models get contaminated items right with high probability
+        if j in contaminated_models and i in contaminated_items:
+            p = 0.95  # Near-certain correct due to memorization
+        X[j, i] = np.random.binomial(1, p)
+
+# --- Estimate item parameters (simple MLE for Rasch) ---
+# Use proportion correct as rough difficulty proxy
+p_obs = X.mean(axis=0)
+beta_hat = -np.log(p_obs / (1 - p_obs + 1e-10))
+
+# Use total score as ability proxy
+total_scores = X.sum(axis=1)
+theta_hat = (total_scores - total_scores.mean()) / (total_scores.std() + 1e-10)
+
+# --- Compute infit and outfit ---
+infit = np.zeros(n_items)
+outfit = np.zeros(n_items)
+
+for i in range(n_items):
+    P = expit(theta_hat - beta_hat[i])
+    variance = P * (1 - P)
+    residual = X[:, i] - P
+    z_sq = residual**2 / (variance + 1e-10)
+
+    outfit[i] = z_sq.mean()
+    infit[i] = (residual**2).sum() / (variance.sum() + 1e-10)
+
+# --- Visualization ---
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+# Panel 1: Infit vs Outfit scatter
+colors = ['#E8637A' if i in contaminated_items else '#5B8DEE' for i in range(n_items)]
+axes[0].scatter(infit, outfit, c=colors, s=80, edgecolors='white', linewidth=0.5, zorder=3)
+for i in range(n_items):
+    axes[0].annotate(f'{i+1}', (infit[i] + 0.02, outfit[i] + 0.02), fontsize=7, color='gray')
+
+# Acceptable range
+axes[0].axhline(y=1.3, color='gray', linewidth=0.8, linestyle='--')
+axes[0].axhline(y=0.7, color='gray', linewidth=0.8, linestyle='--')
+axes[0].axvline(x=1.3, color='gray', linewidth=0.8, linestyle='--')
+axes[0].axvline(x=0.7, color='gray', linewidth=0.8, linestyle='--')
+axes[0].axhline(y=1, color='gray', linewidth=0.5, linestyle=':')
+axes[0].axvline(x=1, color='gray', linewidth=0.5, linestyle=':')
+
+from matplotlib.patches import Patch
+axes[0].legend(handles=[
+    Patch(facecolor='#5B8DEE', label='Clean items'),
+    Patch(facecolor='#E8637A', label='Contaminated items')
+], loc='upper left')
+axes[0].set_xlabel('Infit MNSQ')
+axes[0].set_ylabel('Outfit MNSQ')
+axes[0].set_title('Item Fit Statistics')
+
+# Panel 2: Observed vs expected ICC for a contaminated item
+item_idx = contaminated_items[2]  # Pick one contaminated item
+theta_sorted = np.argsort(theta_hat)
+theta_bins = np.array_split(theta_sorted, 10)
+
+obs_prop = []
+exp_prop = []
+theta_mid = []
+for bin_idx in theta_bins:
+    obs_prop.append(X[bin_idx, item_idx].mean())
+    exp_prop.append(expit(theta_hat[bin_idx] - beta_hat[item_idx]).mean())
+    theta_mid.append(theta_hat[bin_idx].mean())
+
+theta_smooth = np.linspace(-3, 3, 100)
+icc_expected = expit(theta_smooth - beta[item_idx])
+
+axes[1].plot(theta_smooth, icc_expected, '#5B8DEE', linewidth=2, label='Expected (Rasch)')
+axes[1].scatter(theta_mid, obs_prop, color='#E8637A', s=80, zorder=3,
+                edgecolors='white', linewidth=0.5, label='Observed proportions')
+axes[1].set_xlabel(r'Ability ($\theta$)')
+axes[1].set_ylabel('P(Correct)')
+axes[1].set_title(f'Item {item_idx + 1} (Contaminated): Observed vs Expected')
+axes[1].legend()
+axes[1].set_ylim(-0.05, 1.05)
+
+plt.tight_layout()
+plt.show()
+
+# Summary
+print(f"\nItem Fit Summary:")
+print(f"  Items with outfit > 1.3: {sum(1 for x in outfit if x > 1.3)}")
+print(f"  Items with infit > 1.3: {sum(1 for x in infit if x > 1.3)}")
+contaminated_flagged = sum(1 for i in contaminated_items if outfit[i] > 1.3 or infit[i] > 1.3)
+print(f"  Contaminated items flagged: {contaminated_flagged} / {n_contaminated}")
+print(f"\n  Contaminated item fit values:")
+for i in contaminated_items:
+    print(f"    Item {i+1}: infit={infit[i]:.2f}, outfit={outfit[i]:.2f}")
+```
+
+左图展示了infit-outfit散点图：清洁项目（蓝色）聚集在期望值1.0附近，而被污染的项目（红色）则显示出膨胀的拟合统计量，尤其是outfit。这是因为被污染的模型在这些项目上产生了意想不到的正确回答，从而产生了很大的残差。右图展示了一个被污染项目的项目特征曲线（ICC）：观察到的比例（红点）始终高于Rasch期望曲线（蓝线），特别是在能力水平较低的区间，记忆效应最为明显。
+
+项目拟合分析是一种强大的诊断工具，因为它不需要知道*哪些*模型被污染或*哪些*项目被泄露。Rasch模型的预测残差就能揭示异常，无论其来源如何。
+
+
+## 构建有效基准 {#sec-building-valid}
+
+上述诊断工具能检测现有基准中的效度问题。本节将讨论如何从一开始就将效度内置于基准的*构建*过程之中。
+
+### 多特质多方法矩阵 {#sec-mtmm}
+
+由@campbell1959convergent 引入的多特质多方法（MTMM）矩阵，提供了一个同时评估聚合效度和区分效度的系统框架。其思路是使用多种*方法*（测量形式）测量多种*特质*（构念），并考察由此产生的相关矩阵结构。
+
+在AI评估中：
+
+- **特质** 是我们关注的构念：推理、知识检索、创造力、指令遵循等。
+- **方法** 是基准的形式：选择题、开放式生成、成对比较、代码补全等。
+
+MTMM矩阵将相关系数组织为四个区块：
+
+1. **单特质异方法**（相同特质，不同方法）：这些系数应该很高——这体现了聚合效度。如果通过选择题和开放式生成测得的“推理”分数高度相关，说明该构念在不同方法间是稳健的。
+2. **异特质单方法**（不同特质，相同方法）：这些系数应低于单特质异方法的相关——这体现了区分效度。如果“推理-选择题”与“知识-选择题”的相关性，和它与“推理-开放式生成”的相关性一样高，那么方法方差就主导了特质方差。
+3. **异特质异方法**（不同特质，不同方法）：这些系数应该最低——既不共享特质，也不共享方法。
+4. **信度对角线**（相同特质，相同方法，重复测量）：这些系数应该最高——它们为效度设定了上限。
+
+Campbell和Fiske的构念效度标准要求：
+
+1. 收敛效度系数（单特质-异方法）应当显著不为零，并且足够大，才值得进一步研究。
+2. 收敛效度系数应当高于异特质-异方法区块中同一行和同一列的值。
+3. 收敛效度系数应当高于异特质-单方法相关。
+4. 特质间相关的模式应当在不同的方法区块间保持一致。
+
+```{pyodide-python}
+#| label: mtmm-matrix
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+
+np.random.seed(456)
+
+# --- Simulate MTMM data: 3 traits x 2 methods ---
+n_models = 200
+n_traits = 3
+n_methods = 2
+trait_names = ['Reasoning', 'Knowledge', 'Creativity']
+method_names = ['MCQ', 'Open-ended']
+
+# Latent trait scores (moderately correlated)
+trait_corr = np.array([
+    [1.0, 0.3, 0.2],
+    [0.3, 1.0, 0.25],
+    [0.2, 0.25, 1.0]
+])
+L_trait = np.linalg.cholesky(trait_corr)
+traits = np.random.normal(0, 1, (n_models, n_traits)) @ L_trait.T
+
+# Method effects (shared variance due to format)
+method_effects = np.random.normal(0, 0.5, (n_models, n_methods))
+
+# Observed scores: trait + method effect + noise
+scores = np.zeros((n_models, n_traits * n_methods))
+labels = []
+for t in range(n_traits):
+    for m in range(n_methods):
+        col = t * n_methods + m
+        trait_loading = 0.7 + np.random.uniform(-0.05, 0.05)
+        method_loading = 0.3 + np.random.uniform(-0.05, 0.05)
+        noise = np.random.normal(0, 0.3, n_models)
+        scores[:, col] = trait_loading * traits[:, t] + method_loading * method_effects[:, m] + noise
+        labels.append(f'{trait_names[t]}\n({method_names[m]})')
+
+# --- Compute MTMM correlation matrix ---
+corr = np.corrcoef(scores.T)
+
+# --- Visualization ---
+fig, axes = plt.subplots(1, 2, figsize=(6, 2))
+
+# Panel 1: Full MTMM matrix as heatmap
+im = axes[0].imshow(corr, cmap='RdBu_r', vmin=-1, vmax=1, aspect='equal')
+axes[0].set_xticks(range(len(labels)))
+axes[0].set_yticks(range(len(labels)))
+axes[0].set_xticklabels(labels, rotation=45, ha='right')
+axes[0].set_yticklabels(labels)
+
+# Annotate values
+for i in range(len(labels)):
+    for j in range(len(labels)):
+        color = 'white' if abs(corr[i, j]) > 0.6 else 'black'
+        axes[0].text(j, i, f'{corr[i, j]:.2f}', ha='center', va='center',
+                     fontsize=6, color=color)
+
+# Draw block boundaries
+for k in range(1, n_traits):
+    pos = k * n_methods - 0.5
+    axes[0].axhline(y=pos, color='black', linewidth=1.5)
+    axes[0].axvline(x=pos, color='black', linewidth=1.5)
+
+axes[0].set_title('MTMM Correlation Matrix')
+plt.colorbar(im, ax=axes[0], fraction=0.046, pad=0.04)
+
+# Panel 2: Summary of validity coefficients
+# Extract convergent (monotrait-heteromethod) correlations
+convergent = []
+for t in range(n_traits):
+    i, j = t * n_methods, t * n_methods + 1
+    convergent.append(corr[i, j])
+
+# Extract discriminant (heterotrait-monomethod) correlations
+discriminant_mono = []
+for m in range(n_methods):
+    for t1 in range(n_traits):
+        for t2 in range(t1 + 1, n_traits):
+            i = t1 * n_methods + m
+            j = t2 * n_methods + m
+            discriminant_mono.append(corr[i, j])
+
+# Extract heterotrait-heteromethod correlations
+discriminant_hetero = []
+for t1 in range(n_traits):
+    for t2 in range(n_traits):
+        if t1 != t2:
+            for m1 in range(n_methods):
+                for m2 in range(n_methods):
+                    if m1 != m2:
+                        i = t1 * n_methods + m1
+                        j = t2 * n_methods + m2
+                        discriminant_hetero.append(corr[i, j])
+
+categories = ['Convergent\n(monotrait-\nheteromethod)',
+              'Discriminant\n(heterotrait-\nmonomethod)',
+              'Discriminant\n(heterotrait-\nheteromethod)']
+means = [np.mean(convergent), np.mean(discriminant_mono), np.mean(discriminant_hetero)]
+stds = [np.std(convergent) if len(convergent) > 1 else 0,
+        np.std(discriminant_mono), np.std(discriminant_hetero)]
+
+bar_colors = ['#45BF7C', '#F0A35C', '#E8637A']
+bars = axes[1].bar(categories, means, yerr=stds, color=bar_colors, alpha=0.8,
+                   edgecolor='white', capsize=5)
+axes[1].set_ylabel('Mean Correlation')
+axes[1].set_title('Validity Coefficient Summary')
+axes[1].set_ylim(0, 1)
+
+# Add value labels
+for bar, mean in zip(bars, means):
+    axes[1].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.03,
+                 f'{mean:.2f}', ha='center', fontweight='bold')
+
+plt.tight_layout()
+plt.show()
+
+print(f"\nMTMM Validity Check:")
+print(f"  Convergent validity (mean): {np.mean(convergent):.3f}")
+print(f"  Discriminant - monomethod (mean): {np.mean(discriminant_mono):.3f}")
+print(f"  Discriminant - heteromethod (mean): {np.mean(discriminant_hetero):.3f}")
+
+# Campbell-Fiske criteria
+cf1 = all(c > 0 for c in convergent)
+cf2 = np.mean(convergent) > np.mean(discriminant_hetero)
+cf3 = np.mean(convergent) > np.mean(discriminant_mono)
+print(f"\n  Campbell-Fiske Criteria:")
+print(f"    1. Convergent > 0: {'PASS' if cf1 else 'FAIL'}")
+print(f"    2. Convergent > heterotrait-heteromethod: {'PASS' if cf2 else 'FAIL'}")
+print(f"    3. Convergent > heterotrait-monomethod: {'PASS' if cf3 else 'FAIL'}")
+```
+
+左侧热图显示了完整的MTMM相关矩阵，其中特质区块由黑线分隔。强收敛效度表现为每个特质区块内非对角线上较高的相关性（同一特质用不同方法测量）。右侧条形图证实了预期的排序：收敛效度系数（绿色）最高，区分效度-单方法相关（橙色）中等（反映了共享方法方差），区分效度-异方法相关（红色）最低。这一排序满足了Campbell-Fiske的构念效度标准。
+
+对于AI评估而言，构建一项MTMM研究需要使用真正不同的方法来测量相同的构念。如果所有基准测试都使用相同的多项选择格式，就无法评估区分效度，因为方法方差与特质方差相混淆了。
+
+
+### 原则性项目构建与修订 {#sec-item-construction}
+
+构建有效的基准测试不仅仅需要收集大量项目。这一过程应是系统化的：
+
+1. **定义构念**：编写一份明确的构念定义，明确说明该基准测试旨在测量什么以及*不*打算测量什么。这一定义是内容效度的基础。
+
+2. **明确领域**：创建详细的内容规格说明（有时称为"测试蓝图"或"规格说明表"），列举应包含的子领域、难度级别和项目类型。
+
+3. **生成候选项目**：项目可由领域专家编写、从现有材料中获取，或使用大语言模型(LLMs)合成生成。对于合成生成，构念定义和难度目标可作为提示。
+
+4. **试测与分析**：将项目施测于有代表性的模型样本。计算项目统计量：难度（$p$-value 或 IRT $\beta$）、区分度（$a$ 参数或点二列相关）和拟合度（来自 @sec-item-fit 的 infit/outfit）。
+
+5. **筛查效度威胁**：运行 DIF 分析（@sec-dif-analysis）检查群体偏差。运行维度分析（@sec-dimensionality）验证单维性（如果声称单维）。使用拟合统计量和公开/非公开数据拆分检查污染。
+
+6. **修订与迭代**：移除或修订统计量不佳的项目。用新项目替换并重新试测。这一循环持续进行，直到项目池达到质量标准。
+
+以下模拟展示了试测与分析阶段。
+
+```{pyodide-python}
+#| label: item-construction
+#| autorun: true
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.special import expit
+
+np.random.seed(789)
+
+# --- Simulate item pool with varying quality ---
+n_models = 200
+n_candidate_items = 40
+
+theta = np.random.normal(0, 1, n_models)
+
+# Item parameters: some good, some problematic
+beta = np.random.uniform(-2.5, 2.5, n_candidate_items)  # Difficulty
+alpha = np.zeros(n_candidate_items)  # Discrimination
+
+# Good items: discrimination 0.8-1.5
+good_items = list(range(0, 30))
+alpha[good_items] = np.random.uniform(0.8, 1.5, len(good_items))
+
+# Poor items: very low discrimination (nearly random)
+poor_disc_items = list(range(30, 35))
+alpha[poor_disc_items] = np.random.uniform(0.05, 0.25, len(poor_disc_items))
+
+# Contaminated items: appear easy due to memorization
+contaminated = list(range(35, 40))
+alpha[contaminated] = np.random.uniform(0.8, 1.2, len(contaminated))
+# These items have artificially high correct rates
+
+# Generate responses (2PL model)
+X = np.zeros((n_models, n_candidate_items))
+for j in range(n_models):
+    for i in range(n_candidate_items):
+        p = expit(alpha[i] * (theta[j] - beta[i]))
+        # Contaminated items: 40% of models get them right regardless
+        if i in contaminated and np.random.random() < 0.4:
+            p = 0.95
+        X[j, i] = np.random.binomial(1, p)
+
+# --- Compute item statistics ---
+# Difficulty: proportion correct
+p_values = X.mean(axis=0)
+
+# Point-biserial correlation (discrimination proxy)
+total_scores = X.sum(axis=1)
+point_biserial = np.array([np.corrcoef(X[:, i], total_scores)[0, 1] for i in range(n_candidate_items)])
+
+# Infit (simplified Rasch-based)
+# Rough ability estimates from total score
+theta_hat = (total_scores - total_scores.mean()) / (total_scores.std() + 1e-10)
+beta_hat = -np.log(p_values / (1 - p_values + 1e-10))
+
+infit = np.zeros(n_candidate_items)
+for i in range(n_candidate_items):
+    P = expit(theta_hat - beta_hat[i])
+    variance = P * (1 - P)
+    residual = X[:, i] - P
+    infit[i] = (residual**2).sum() / (variance.sum() + 1e-10)
+
+# --- Flag items ---
+flags = []
+for i in range(n_candidate_items):
+    item_flags = []
+    if point_biserial[i] < 0.2:
+        item_flags.append('Low discrimination')
+    if infit[i] > 1.3:
+        item_flags.append('Misfit')
+    if infit[i] < 0.7:
+        item_flags.append('Overfit')
+    if p_values[i] > 0.95 or p_values[i] < 0.05:
+        item_flags.append('Extreme difficulty')
+    flags.append(item_flags)
+
+# --- Visualization ---
+fig, axes = plt.subplots(1, 3, figsize=(6, 2))
+
+# Assign colors based on item type
+def get_color(i):
+    if i in poor_disc_items: return '#E8637A'
+    if i in contaminated: return '#F0A35C'
+    return '#5B8DEE'
+
+item_colors = [get_color(i) for i in range(n_candidate_items)]
+
+# Panel 1: Difficulty vs Discrimination
+axes[0].scatter(p_values, point_biserial, c=item_colors, s=60,
+                edgecolors='white', linewidth=0.5, zorder=3)
+axes[0].axhline(y=0.2, color='gray', linewidth=0.8, linestyle='--', label='Min discrimination')
+axes[0].axvline(x=0.05, color='gray', linewidth=0.8, linestyle=':')
+axes[0].axvline(x=0.95, color='gray', linewidth=0.8, linestyle=':')
+axes[0].set_xlabel('Difficulty (Proportion Correct)')
+axes[0].set_ylabel('Point-Biserial Correlation')
+axes[0].set_title('Item Difficulty vs Discrimination')
+from matplotlib.patches import Patch
+axes[0].legend(handles=[
+    Patch(facecolor='#5B8DEE', label='Good items'),
+    Patch(facecolor='#E8637A', label='Low discrimination'),
+    Patch(facecolor='#F0A35C', label='Contaminated')
+], loc='lower left')
+
+# Panel 2: Infit distribution
+axes[1].bar(range(n_candidate_items), infit, color=item_colors, alpha=0.8, edgecolor='white')
+axes[1].axhline(y=1.0, color='black', linewidth=0.8)
+axes[1].axhline(y=1.3, color='gray', linewidth=0.8, linestyle='--')
+axes[1].axhline(y=0.7, color='gray', linewidth=0.8, linestyle='--')
+axes[1].fill_between(range(n_candidate_items), 0.7, 1.3, alpha=0.05, color='green')
+axes[1].set_xlabel('Item Index')
+axes[1].set_ylabel('Infit MNSQ')
+axes[1].set_title('Item Fit Statistics')
+
+# Panel 3: Summary of item screening
+n_good = sum(1 for f in flags if len(f) == 0)
+n_flagged = sum(1 for f in flags if len(f) > 0)
+categories = ['Accepted', 'Flagged']
+counts = [n_good, n_flagged]
+bar_colors_summary = ['#45BF7C', '#E8637A']
+bars = axes[2].bar(categories, counts, color=bar_colors_summary, alpha=0.8, edgecolor='white')
+for bar, count in zip(bars, counts):
+    axes[2].text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.5,
+                 str(count), ha='center', fontweight='bold')
+axes[2].set_ylabel('Number of Items')
+axes[2].set_title('Item Screening Results')
+
+plt.tight_layout()
+plt.show()
+
+print(f"\nItem Screening Summary:")
+print(f"  Total candidate items: {n_candidate_items}")
+print(f"  Accepted (no flags): {n_good}")
+print(f"  Flagged for review: {n_flagged}")
+print(f"\n  Flag breakdown:")
+flag_counts = {}
+for f_list in flags:
+    for f in f_list:
+        flag_counts[f] = flag_counts.get(f, 0) + 1
+for flag, count in sorted(flag_counts.items()):
+    print(f"    {flag}: {count} items")
+```
+
+三个面板展示了题目筛选工作流程。难度-区分度图（左）揭示，低区分度题目（红色）聚集在0.2阈值以下，提供的测量信息很少，而污染题目（橙色）则显示出膨胀的正确比例值。Infit图（中）突出了偏离模型预测的题目。摘要（右）显示了产出：有多少候选题目通过了筛选。被标记的题目应在基准最终确定前进行修订或替换。
+
+
+### 法则网络 {#sec-nomological-networks}
+
+**法则网络**的概念由@cronbach1955construct 提出，作为确立构念效度的更广泛的理论背景。一个构念不是孤立存在的---它由它与其他构念、可观察行为和实验结果的法则性关系所定义。
+
+对于AI评估，法则网络明确说明：
+
+- **该构念应当预测什么**：“数学推理”应能预测在新颖数学问题上的成功、在辅导场景中的表现，以及验证证明的能力。
+- **什么应当预测该构念**：使用多样化的数学数据训练、思维链提示以及模型规模，都应能提高数学推理分数。
+- **该构念应与什么有所区分**：数学推理应当与对特定问题-解答对的记忆、语言流畅性以及基于表面特征的模式匹配相分离。
+
+@salaudeen2025measurement 通过其以声明为中心的框架将这一点操作化：每个基准都应当伴随关于分数含义的明确声明，并且应当为每一个声明收集效度证据。这比完整的法则网络更实用，后者需要指定所有理论关系，但同样达到了将分数嵌入意义网络中的目的。
+
+来自 @sec-mtmm 的多特质多方法分析通过检验预期的汇聚与区分关系是否确实成立，为法则网络提供了实证证据。来自 @sec-dif-analysis 和 @sec-item-fit 的项目级诊断则确保个别项目如构念理论所预测的那样发挥作用。
+
+::: {.callout-note title="从Borsboom到Salaudeen：效度的两种观点"}
+Borsboom的实在论框架追问：**该属性是否存在，它是否因果性地导致了分数的变异？** 这是一个强烈的本体论主张，需要因果证据。
+
+Salaudeen等人的以主张为中心的框架追问：**这个基准支持哪些具体的主张，以及每个主张存在哪些证据？** 这更为务实，承认效度是分程度的，且取决于使用场景。
+
+这两个框架是互补的。Borsboom的框架设定了哲学标准；Salaudeen等人的框架则将其操作化，用于实际的AI评估。两者都认同效度并非二元属性，且需要多种形式的证据。
+:::
+
+
+## 设计有效的AI评估 {#sec-valid-design-principles}
+
+我们以六条设计原则作结，这些原则综合了本章所发展的概念。
+
+**1. 从构念出发，而非数据。** 在收集条目之前，先明确你要测量什么。制定明确的构念定义和内容规范。这能防止构念代表性不足，并使内容效度可评估。
+
+**2. 使用多种方法。** 每个构念至少用两种不同的格式（例如，选择题和开放式问题）来测量。这能实现多特质多方法分析，将特质变异与方法变异分开。跨方法稳健的构念具有更强的效度证据。
+
+**3. 检查维度。** 在报告单一组合分数之前，先验证基准是单维的（或报告每个维度的子分数）。平行分析成本低，能避免产生误导性的组合分数。
+
+**4. 筛查项目功能差异。** 每当模型总体包含明显不同的子群体（架构家族、训练范式、模型规模）时，就进行DIF分析，以检测在不同群体上功能不同的项目。
+
+**5. 监控污染。** 维护一个保留的私密项目池。比较在公开和私密项目上的表现。使用项目拟合统计量，标记出某些模型表现异常好的项目。
+
+**6. 记录效度证据。** 遵循以声明为中心的方法：针对基准旨在支持的每个声明，记录可用的效度证据及其局限性。这种透明度使用户能够判断基准是否支持*他们*预期的解释。
+
+**实例：评估总结能力。** 假设你要构建一个基准，用于评估语言模型总结文档的效果。
+
+- *构念定义*：生成简洁、准确且连贯的源文档摘要的能力，同时保留关键信息并省略无关细节。
+- *内容规范*：来自5个领域（新闻、科学、法律、医学、对话）的文档，3种长度（短、中、长），2种体裁（信息型、叙事型）。
+- *多种方法*：通过 (a) 与参考摘要对比的ROUGE指标，(b) 基于评分细则的LLM-as-judge评估，(c) 人类专家评分，来评估摘要。
+- *维度检查*：因子分析揭示两个维度：事实准确性和连贯性。分别报告每个维度的子分数。
+- *DIF分析*：比较针对摘要微调的模型与通用模型。标记出领域特定词汇带来无关优势的项目。
+- *污染检查*：使用网上未公开的保留文档。比较私密与公开文档上的性能差距。
+
+
+## 讨论问题 {#sec-validity-discussion}
+
+1. 一个编码基准测试产生的分数，其重测信度 (test-retest reliability) 为 0.95，克隆巴赫 α 系数 (Cronbach's alpha) 为 0.93。这是否足以作为效度 (validity) 证据？你还需要哪些额外证据，为什么？
+
+2. 基准污染 (benchmark contamination) 与构念无关变异 (construct-irrelevant variance) 有何不同？你能描述一个场景，其中训练数据重叠实际上是*构念相关*的，而非效度威胁吗？
+
+3. 设计一项多特质多方法 (MTMM) 研究，用于评估大型语言模型的“数学推理”能力。请明确说明特质、方法，以及预期的会聚相关和区分相关模式。
+
+4. 古德哈特定律 (Goodhart's law) 指出，任何用作优化目标的基准最终都会丧失效度。这是否使得后果效度 (consequential validity) 从根本上与其他四种效度形式有所不同？还是说它是构念无关变异的一个特例？
+
+5. 差异项目功能 (DIF) 分析在控制能力后识别出在不同组间功能不同的项目。在 AI 评估中，何时应将 DIF 视为需要修正的效度问题，何时它又可能反映出基准测试理应捕获的*真实的*组间差异？
+
+
+## 文献注释 {#sec-validity-biblio}
+
+效度的概念基础在过去一个世纪里有了长足的发展。@cronbach1955construct 引入了构念效度与法则网络 (nomological network) 的概念，主张效度需要将构念嵌入一个理论关系网络中。@messick1995validity 将先前各自独立的效度类型统一为一个框架，提出所有效度都是构念效度，内容证据、效标证据和后果证据是这一统一概念的*不同侧面*。@kane2006validation 使基于论证的验证方法成型，该方法要求指明从观察分数到预定解释的整个推理链条，并为每一环节收集证据。
+
+@borsboom2005measuring 以一个实在论解释向正统框架提出了挑战：一个测验是有效的，当且仅当目标属性存在并因果性地导致分数变异。这一因果视角将效度与 @sec-causality 所讨论的结构因果模型联系了起来。
+
+多特质多方法矩阵由 @campbell1959convergent 提出，且至今仍是评估会聚效度和区分效度最系统的方法之一。差异项目功能分析方法在 @holland1988differential 和 @zumbo1999handbook 中有全面的论述。Rasch 模型的题目拟合统计量由 @wright1982solving 开发。用于维度评估的平行分析则由 @horn1965rationale 提出。
+
+针对AI特有的效度问题，@salaudeen2025measurement 提出了一种以声明为中心的框架，将经典效度概念适配到基准评估中。@kiela2021dynabench 主张采用动态基准测试来对抗数据污染和古德哈特定律。@jacovi2023stop 则直接处理了数据污染问题，提出了保护测试数据的实用策略。AI评估效度面临的更广泛挑战由 @shankar2024validates 和 @biderman2024lessons 进行了讨论。@truong2025bugs 证明，题目层面的效度威胁——如错误的答案键、模棱两可的表述、评分错误——能够通过利用拉希模型充分性性质衍生出的信度诊断方法，在大规模上被检测出来。他们的框架在九个基准中对排名前50的标记题目实现了高达84%的精确率，这展示了测量理论如何为基准质量保障提供可操作的工具。
+
+信度与效度之间的关系已在 @sec-reliability 中进行了铺垫，我们在那里确立了信度是效度的必要但不充分条件。效度的因果维度——特别是Borsboom的因果定义与结构因果模型之间的关系——将在 @sec-causality 中进一步展开。
+
+
+## 练习 {#sec-validity-exercises}
+
+**理论**
+
+1. 证明如果一个题目在两个群体之间表现出均匀DIF（即，该题目在所有能力水平上对一个群体始终更容易），那么标准的拉希模型 $P(X_{ij}=1) = \text{expit}(\theta_j - \beta_i)$ 不可能同时对两个群体成立且使用相同的题目参数 $\beta_i$。这说明当存在DIF时，“题目难度”的含义会如何变化？
+
+2. 考虑一个2特质×2方法的MTMM设计。证明如果所有聚合效度系数均等于1（完美聚合效度），且所有异特质相关均等于0（完美区分效度），那么方法因子贡献零方差。这说明在实际中当方法方差非零时，分数的可解释性会受到什么影响？
+
+3. 将infit均方定义为 $\text{Infit}_i = \sum_j (X_{ij} - P_{ij})^2 / \sum_j P_{ij}(1-P_{ij})$。假设有比例 $\gamma$ 的模型记住了题目 $i$，无论能力如何都以概率1正确回答。试推导期望infit作为 $\gamma$ 和题目难度 $\beta_i$ 的函数。当 $\gamma$ 取何值时，infit会超过惯用的1.3阈值？
+
+4. 运用Borsboom关于效度的因果定义，论证“提示敏感性”（模型在保持问题内容不变但改变提示模板时得分变化）是效度威胁还是信度威胁？在何种条件下它可能同时成为两者？
+
+**计算**
+
+5. 下载一个公开可用的 AI 基准数据集（例如 MMLU、HellaSwag 或 ARC）。将模型分为两组（例如，参数规模在 7B 以上和以下的模型）。进行 Mantel-Haenszel DIF 分析，报告哪些条目（如有）表现出显著的 DIF。解释结果：DIF 反映的是真正的能力差异，还是与构念无关的特征？
+
+6. 使用 @sec-foundations 中的因素模型，模拟一个具有 3 个底层因素（例如，语言推理、定量推理和空间推理）的基准。为 300 个模型在 30 个条目（每个因素 10 个）上生成响应。实施平行分析以确定正确的维度。平行分析的准确性如何依赖于因素相关性和样本量？
+
+7. 使用 @sec-mtmm 中的 MTMM 模拟框架，改变特质载荷与方法载荷的相对强度。当 Campbell-Fiske 标准开始失效时，比率是多少？绘制聚合效度和区分效度系数作为特质-方法方差比的函数。
+
+**讨论**
+
+8. @salaudeen2025measurement 主张，效度应针对具体主张进行评估，而非作为基准的整体属性。@borsboom2005measuring 则认为，效度从根本上取决于目标属性是否存在，以及它是否因果性地产生了分数变异。比较这两种框架。它们在什么条件下会达成一致？在什么条件下可能会产生分歧？哪个框架对于指导实际的基准设计更有用，为什么？
